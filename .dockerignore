@@ -1,0 +1,45 @@
+# The image only needs: requirements.txt, app.py, models/model.pkl, reports/
+# (see Dockerfile). Everything else is excluded to keep the build fast and small.
+
+# Version control / CI / DVC
+.git
+.gitignore
+.github
+.dvc
+.dvcignore
+dvc.yaml
+dvc.lock
+
+# Experiment tracking and data
+mlruns
+mlartifacts
+data
+
+# Training code and config (not needed to run the app)
+src
+params.yaml
+requirements-dvc.txt
+
+# Keep only the champion model; skip the other five candidate models
+models/*.pkl
+!models/model.pkl
+
+# Python / environment junk
+__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+env
+.ipynb_checkpoints
+.pytest_cache
+
+# Editor / OS files
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Docker files themselves
+Dockerfile
+.dockerignore

@@ -1,0 +1,37 @@
+experiment_name: bank_marketing_campaign
+random_state: 42
+test_size: 0.2
+cv_folds: 5
+n_trials: 20
+
+data:
+  # UCI "bank-full.csv" (sep ';', target 'y'). For bank-additional-full.csv keep
+  # the same settings; for the Kaggle bank.csv use sep ',' and target 'deposit'.
+  raw_path: data/raw/bank.csv
+  separator: ","
+  target: deposit
+  positive_label: "yes"
+  # 'duration' is only known AFTER the call ends, so it leaks the outcome.
+  # Keep it dropped for a realistic "who should we call?" model.
+  drop_columns: ["duration"]
+
+metric:
+  # Bank marketing is imbalanced (~12% 'yes'): do not use accuracy here.
+  # Options: f1 | roc_auc | average_precision | balanced_accuracy | accuracy
+  primary: f1
+
+selection:
+  max_score_gap_pct: 5.0          # train score - CV score must be strictly below this
+  score_tolerance_pct: 1.0        # finalists are within this many pp of the best CV score
+  gap_penalty_in_search: true
+  gap_penalty_weight: 1.0
+  fallback_if_none_eligible: smallest_gap   # or: error
+  weights:
+    model_size_mb: 0.3
+    training_time_seconds: 0.4
+    prediction_time_ms: 0.3
+
+measurement:
+  training_time_repeats: 3
+  prediction_n_samples: 50
+  prediction_repeats: 3
