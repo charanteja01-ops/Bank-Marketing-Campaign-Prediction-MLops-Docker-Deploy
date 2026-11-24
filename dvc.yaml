@@ -4,6 +4,8 @@ stages:
     deps:
       - src/data_ingestion.py
       - data/raw/bank.csv
+    params:
+      - data
     outs:
       - data/ingested/bank.csv
 
@@ -13,12 +15,12 @@ stages:
       - src/data_preprocessing.py
       - data/ingested/bank.csv
     params:
+      - data
       - test_size
       - random_state
     outs:
       - data/processed/train.csv
       - data/processed/test.csv
-      - data/processed/cleaning_values.json
 
   feature_engineering:
     cmd: python src/feature_engineering.py
@@ -27,7 +29,7 @@ stages:
       - data/processed/train.csv
       - data/processed/test.csv
     params:
-      - exclude_features
+      - data
     outs:
       - data/processed/X_train.csv
       - data/processed/X_test.csv
@@ -45,6 +47,8 @@ stages:
       - random_state
       - cv_folds
       - n_trials
+      - data
+      - metric
       - selection
       - measurement
     outs:
@@ -61,6 +65,10 @@ stages:
       - data/processed/X_test.csv
       - data/processed/y_test.csv
       - reports/model_selection.json
+    params:
+      - data
+      - experiment_name
+      - metric
     metrics:
       - reports/metrics.json:
           cache: false
