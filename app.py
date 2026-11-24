@@ -1,15 +1,16 @@
-"""Streamlit app: Bank Marketing Campaign Predictor.
+"""Streamlit MLOps serving application for Bank Marketing Campaign Prediction.
 
-Run from the project folder (the one that contains models/ and reports/):
-
-    streamlit run app.py
-
-It loads the champion pipeline saved by the DVC pipeline (models/model.pkl).
-If that file is missing you can upload a trained pipeline (.pkl) in the sidebar.
+Features:
+- Live single-customer and batch CSV inference with probability visualization.
+- Automatic production payload & prediction logging for data drift tracking.
+- Interactive champion model metadata, multi-criteria benchmark & lineage inspector.
+- Real-time statistical data drift monitoring dashboard (KS-Test + Chi-Square).
 """
 import io
 import json
+import math
 from pathlib import Path
+import sys
 
 import joblib
 import numpy as np
@@ -17,20 +18,195 @@ import pandas as pd
 import streamlit as st
 from sklearn.metrics import accuracy_score, f1_score
 
-MODEL_PATH = Path("models/model.pkl")
-DETAILS_PATH = Path("reports/evaluation_details.json")
-METRICS_PATH = Path("reports/metrics.json")
+BASE_DIR = Path(__file__).resolve().parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
-TARGET = "deposit"          # only used if a batch CSV contains the true answer
+MODEL_PATH = BASE_DIR / "models" / "model.pkl"
+SELECTION_PATH = BASE_DIR / "reports" / "model_selection.json"
+METRICS_PATH = BASE_DIR / "reports" / "metrics.json"
+DETAILS_PATH = BASE_DIR / "reports" / "evaluation_details.json"
+COMPARISON_CSV_PATH = BASE_DIR / "reports" / "model_comparison.csv"
+
+try:
+    from src.monitor_drift import (
+        FEATURE_COLUMNS,
+        INFERENCE_LOG_PATH,
+        REFERENCE_DATA_PATH,
+        analyze_drift,
+        generate_sample_production_data,
+        load_inference_logs,
+        log_inference,
+    )
+except ImportError:
+    try:
+        from monitor_drift import (
+            FEATURE_COLUMNS,
+            INFERENCE_LOG_PATH,
+            REFERENCE_DATA_PATH,
+            analyze_drift,
+            generate_sample_production_data,
+            load_inference_logs,
+            log_inference,
+        )
+    except ImportError:
+        INFERENCE_LOG_PATH = BASE_DIR / "reports" / "inference_logs.csv"
+        REFERENCE_DATA_PATH = BASE_DIR / "data" / "processed" / "X_train.csv"
+        FEATURE_COLUMNS = [
+            "age", "job", "marital", "education", "default", "balance",
+            "housing", "loan", "contact", "day", "month", "campaign",
+            "pdays", "previous", "poutcome", "previously_contacted",
+        ]
+        _NUMERIC_FEATURES = {
+            "age", "balance", "day", "campaign", "pdays", "previous",
+        }
+
+        def _ks_2samp(x, y):
+            x = np.sort(np.asarray(x, dtype=float))
+            y = np.sort(np.asarray(y, dtype=float))
+            n1, n2 = len(x), len(y)
+            combined = np.concatenate([x, y])
+            cdf1 = np.searchsorted(x, combined, side="right") / n1
+            cdf2 = np.searchsorted(y, combined, side="right") / n2
+            d = float(np.max(np.abs(cdf1 - cdf2)))
+            en = math.sqrt(n1 * n2 / (n1 + n2))
+            lam = (en + 0.12 + 0.11 / en) * d
+            if lam <= 0.0:
+                return d, 1.0
+            j = np.arange(1, 101)
+            p = float(np.clip(2.0 * np.sum(((-1.0) ** (j - 1)) * np.exp(-2.0 * (j ** 2) * (lam ** 2))), 0.0, 1.0))
+            return d, p
+
+        def _gammaincc(a, x):
+            if x <= 0.0:
+                return 1.0
+            if x < a + 1.0:
+                ap = a
+                total = 1.0 / a
+                delta = total
+                for _ in range(200):
+                    ap += 1.0
+                    delta *= x / ap
+                    total += delta
+                    if abs(delta) < abs(total) * 1e-14:
+                        break
+                p_lower = total * math.exp(-x + a * math.log(x) - math.lgamma(a))
+                return max(0.0, min(1.0, 1.0 - p_lower))
+            b = x + 1.0 - a
+            c = 1.0 / 1e-30
+            d = 1.0 / b
+            h = d
+            for i in range(1, 201):
+                an = -i * (i - a)
+                b += 2.0
+                d = an * d + b
+                if abs(d) < 1e-30:
+                    d = 1e-30
+                c = b + an / c
+                if abs(c) < 1e-30:
+                    c = 1e-30
+                d = 1.0 / d
+                delta = d * c
+                h *= delta
+                if abs(delta - 1.0) < 1e-14:
+                    break
+            return max(0.0, min(1.0, math.exp(-x + a * math.log(x) - math.lgamma(a)) * h))
+
+        def _chi2_contingency(contingency):
+            obs = np.asarray(contingency, dtype=float)
+            total = obs.sum()
+            if total <= 0:
+                return 0.0, 1.0
+            expected = (obs.sum(axis=1, keepdims=True) @ obs.sum(axis=0, keepdims=True)) / total
+            mask = expected > 0
+            chi2_stat = float(np.sum(((obs[mask] - expected[mask]) ** 2) / expected[mask]))
+            dof = (obs.shape[0] - 1) * (obs.shape[1] - 1)
+            p_val = _gammaincc(dof / 2.0, chi2_stat / 2.0) if dof > 0 else 1.0
+            return chi2_stat, float(p_val)
+
+        def load_inference_logs(log_path=INFERENCE_LOG_PATH):
+            path = Path(log_path)
+            return pd.read_csv(path) if path.exists() else pd.DataFrame()
+
+        def log_inference(input_df, prediction, proba_dict=None, log_path=INFERENCE_LOG_PATH):
+            path = Path(log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            cols = [c for c in FEATURE_COLUMNS if c in input_df.columns]
+            record = input_df[cols].copy() if cols else input_df.copy()
+            record["predicted_class"] = prediction
+            if proba_dict:
+                for k, v in proba_dict.items():
+                    record[f"prob_{k}"] = float(v)
+            record["timestamp"] = pd.Timestamp.now(tz="UTC").isoformat()
+            record.to_csv(path, mode="a", header=not path.exists(), index=False)
+
+        def generate_sample_production_data(ref_df, simulate_drift=False, n_samples=100, seed=42):
+            return ref_df.sample(n=min(n_samples, len(ref_df)), replace=True, random_state=seed).reset_index(drop=True)
+
+        def analyze_drift(ref_df, curr_df, p_value_threshold=0.05, drift_share_threshold=0.50):
+            available = [c for c in FEATURE_COLUMNS if c in ref_df.columns and c in curr_df.columns]
+            if not available:
+                raise ValueError("No overlapping feature columns found between reference and current data.")
+            feature_results = {}
+            drifted_count = 0
+            for col in available:
+                ref_s = ref_df[col].dropna()
+                cur_s = curr_df[col].dropna()
+                if len(ref_s) == 0 or len(cur_s) == 0:
+                    continue
+                if col in _NUMERIC_FEATURES:
+                    r_v = pd.to_numeric(ref_s, errors="coerce").dropna()
+                    c_v = pd.to_numeric(cur_s, errors="coerce").dropna()
+                    stat, p_val = _ks_2samp(r_v, c_v)
+                    drifted = bool(p_val < p_value_threshold)
+                    r_m, c_m = float(r_v.mean()), float(c_v.mean())
+                    feature_results[col] = {
+                        "test_name": "KS-test",
+                        "drift_detected": drifted,
+                        "p_value": float(p_val),
+                        "statistic": float(stat),
+                        "reference_mean": r_m,
+                        "current_mean": c_m,
+                        "mean_shift": float(c_m - r_m),
+                    }
+                else:
+                    rc = ref_s.astype(str).value_counts()
+                    cc = cur_s.astype(str).value_counts()
+                    cats = sorted(set(rc.index) | set(cc.index))
+                    if len(cats) < 2:
+                        stat, p_val = 0.0, 1.0
+                    else:
+                        cont = np.array([[rc.get(k, 0) for k in cats], [cc.get(k, 0) for k in cats]])
+                        stat, p_val = _chi2_contingency(cont)
+                    drifted = bool(p_val < p_value_threshold)
+                    feature_results[col] = {
+                        "test_name": "Chi-square",
+                        "drift_detected": drifted,
+                        "p_value": float(p_val),
+                        "statistic": float(stat),
+                        "reference_mean": None,
+                        "current_mean": None,
+                        "mean_shift": None,
+                    }
+                if drifted:
+                    drifted_count += 1
+            total = len(feature_results)
+            share = round((drifted_count / total) * 100.0, 2) if total > 0 else 0.0
+            return {
+                "dataset_drift_detected": bool((drifted_count / total) >= drift_share_threshold) if total > 0 else False,
+                "drifted_features": drifted_count,
+                "total_features": total,
+                "drift_share_pct": share,
+                "features": feature_results,
+            }
+
+TARGET = "deposit"
 POSITIVE_LABEL = "yes"
 
-# Raw inputs the user provides. 'duration' is NOT used: it is only known after
-# the call ends, so the model was trained without it (see params.yaml).
 RAW_INPUTS = [
     "age", "job", "marital", "education", "default", "balance", "housing",
     "loan", "contact", "day", "month", "campaign", "pdays", "previous", "poutcome",
 ]
-# Columns the pipeline creates itself (must match src/feature_engineering.py).
 DERIVED = ["previously_contacted"]
 
 OPTIONS = {
@@ -45,8 +221,10 @@ OPTIONS = {
     "housing": ["yes", "no"],
     "loan": ["no", "yes"],
     "contact": ["cellular", "telephone", "unknown"],
-    "month": ["jan", "feb", "mar", "apr", "may", "jun",
-              "jul", "aug", "sep", "oct", "nov", "dec"],
+    "month": [
+        "jan", "feb", "mar", "apr", "may", "jun",
+        "jul", "aug", "sep", "oct", "nov", "dec",
+    ],
     "poutcome": ["unknown", "failure", "success", "other"],
 }
 
@@ -59,19 +237,19 @@ DEFAULT_VALUES = {
 
 PRESETS = {
     "Pick an example profile...": None,
-    "Example A: young professional": {
+    "Example A: Young professional (high intent)": {
         "age": 34, "job": "management", "marital": "single", "education": "tertiary",
         "default": "no", "balance": 3500, "housing": "no", "loan": "no",
         "contact": "cellular", "day": 15, "month": "mar", "campaign": 1,
         "pdays": 90, "previous": 2, "poutcome": "success",
     },
-    "Example B: retired saver": {
+    "Example B: Retired saver": {
         "age": 67, "job": "retired", "marital": "married", "education": "secondary",
         "default": "no", "balance": 5200, "housing": "no", "loan": "no",
         "contact": "cellular", "day": 10, "month": "oct", "campaign": 1,
         "pdays": -1, "previous": 0, "poutcome": "unknown",
     },
-    "Example C: blue-collar with loans": {
+    "Example C: Blue-collar with loans": {
         "age": 41, "job": "blue-collar", "marital": "married", "education": "primary",
         "default": "no", "balance": 250, "housing": "yes", "loan": "yes",
         "contact": "unknown", "day": 20, "month": "may", "campaign": 3,
@@ -81,96 +259,81 @@ PRESETS = {
 
 CSS = """
 <style>
-.block-container {padding-top: 1.6rem; max-width: 1150px;}
+.block-container {padding-top: 1.5rem; max-width: 1200px;}
 .hero {
     background: linear-gradient(120deg, #1e3a8a 0%, #2563eb 55%, #06b6d4 100%);
-    color: #ffffff; padding: 1.6rem 2rem; border-radius: 20px; margin-bottom: 1.2rem;
-    box-shadow: 0 10px 30px rgba(37, 99, 235, 0.25);
+    color: #ffffff; padding: 1.5rem 2rem; border-radius: 18px; margin-bottom: 1.2rem;
+    box-shadow: 0 10px 28px rgba(37, 99, 235, 0.22);
 }
-.hero h1 {margin: 0; font-size: 2rem; color: #ffffff;}
-.hero p {margin: .35rem 0 0 0; opacity: .92; font-size: 1.02rem; color: #ffffff;}
-.card {
-    border: 1px solid rgba(128,128,128,.28); border-radius: 18px;
-    padding: 1.2rem 1.4rem; background: rgba(128,128,128,.07);
-}
-.section-title {font-weight: 700; font-size: 1.05rem; margin: .2rem 0 .6rem 0;}
+.hero h1 {margin: 0; font-size: 1.95rem; color: #ffffff;}
+.hero p {margin: .35rem 0 0 0; opacity: .92; font-size: 1rem; color: #ffffff;}
+.section-title {font-weight: 700; font-size: 1.02rem; margin: .2rem 0 .6rem 0;}
 div[data-testid="stMetric"] {
-    border: 1px solid rgba(128,128,128,.28); border-radius: 16px;
-    padding: .8rem 1rem; background: rgba(128,128,128,.07);
+    border: 1px solid rgba(128,128,128,.25); border-radius: 14px;
+    padding: .7rem .9rem; background: rgba(128,128,128,.06);
 }
-.ring-wrap {position: relative; width: 190px; height: 190px; margin: 0 auto;}
+.ring-wrap {position: relative; width: 180px; height: 180px; margin: 0 auto;}
 .ring {
     width: 100%; height: 100%; border-radius: 50%;
     background: conic-gradient(var(--c) calc(var(--p) * 1%), rgba(128,128,128,.25) 0);
-    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 18px), #000 calc(100% - 17px));
-            mask: radial-gradient(farthest-side, transparent calc(100% - 18px), #000 calc(100% - 17px));
+    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 17px), #000 calc(100% - 16px));
+            mask: radial-gradient(farthest-side, transparent calc(100% - 17px), #000 calc(100% - 16px));
 }
 .ring-text {
     position: absolute; inset: 0; display: flex; flex-direction: column;
     align-items: center; justify-content: center;
 }
-.ring-text .pct {font-size: 2.3rem; font-weight: 800; line-height: 1;}
-.ring-text .lbl {font-size: .8rem; opacity: .7; margin-top: .25rem;}
+.ring-text .pct {font-size: 2.15rem; font-weight: 800; line-height: 1;}
+.ring-text .lbl {font-size: .78rem; opacity: .72; margin-top: .25rem;}
 .badge {
     display: inline-block; padding: .35rem .9rem; border-radius: 999px;
-    font-weight: 700; color: #ffffff; font-size: 1rem;
+    font-weight: 700; color: #ffffff; font-size: .95rem;
 }
-.small-note {font-size: .85rem; opacity: .75;}
+.small-note {font-size: .85rem; opacity: .78;}
 </style>
 """
 
 
-# --------------------------------------------------------------------------
-# Helpers (no Streamlit calls, so they are easy to test)
-# --------------------------------------------------------------------------
-def add_features(X):
-    """Same stateless feature step as src/feature_engineering.py.
+def add_features(X: pd.DataFrame) -> pd.DataFrame:
+    """Idempotent stateless feature engineering matching src/feature_engineering.py.
 
-    pdays is -1 when the client was never contacted before. Expose that as a
-    flag and set pdays to 0 for those rows. Keep in sync with the training code.
+    Skips pdays sentinel replacement if 'previously_contacted' already exists
+    (e.g., rows sampled from X_train.csv where pdays=-1 was already mapped to 0).
     """
     X = X.copy()
-    if "pdays" in X.columns:
+    if "previously_contacted" not in X.columns and "pdays" in X.columns:
         contacted = ~X["pdays"].isin([-1, 999])
         X["previously_contacted"] = contacted.astype(int)
         X["pdays"] = X["pdays"].where(contacted, 0)
     return X
 
 
-def model_columns(model):
-    """Columns the pipeline was fitted on, in order."""
+def model_columns(model) -> list:
     cols = getattr(model, "feature_names_in_", None)
     return list(cols) if cols is not None else RAW_INPUTS + DERIVED
 
 
-def input_columns(model):
-    """Columns the user has to provide (model columns minus derived ones)."""
+def input_columns(model) -> list:
     return [c for c in model_columns(model) if c not in DERIVED]
 
 
-def prepare(df, model):
-    """Raw user rows -> exactly the frame the pipeline expects."""
+def prepare(df: pd.DataFrame, model) -> pd.DataFrame:
     return add_features(df)[model_columns(model)]
 
 
-def score_positive(model, X):
-    """Likelihood score of deposit = 'yes' for each row.
-
-    Returns (scores, is_probability). Models without predict_proba use a
-    sigmoid of the decision function instead.
-    """
+def score_positive(model, X: pd.DataFrame):
     classes = list(model.classes_)
-    positive = 1 if 1 in classes else POSITIVE_LABEL   # trained on 0/1 labels
-    pos = classes.index(positive)
+    positive = 1 if 1 in classes else POSITIVE_LABEL
+    pos_idx = classes.index(positive)
     if hasattr(model, "predict_proba"):
-        return model.predict_proba(X)[:, pos], True
+        return model.predict_proba(X)[:, pos_idx], True
     decision = model.decision_function(X)
-    if pos == 0:
+    if pos_idx == 0:
         decision = -decision
     return 1.0 / (1.0 + np.exp(-decision)), False
 
 
-def verdict_for(score, threshold):
+def verdict_for(score: float, threshold: float):
     if score >= threshold:
         return "Likely to subscribe", "#16a34a"
     if score >= max(threshold - 0.15, 0.0):
@@ -178,23 +341,7 @@ def verdict_for(score, threshold):
     return "Unlikely to subscribe", "#ef4444"
 
 
-def ring_html(score, color):
-    pct = int(round(score * 100))
-    return (
-        f'<div class="ring-wrap"><div class="ring" style="--p:{pct}; --c:{color}"></div>'
-        f'<div class="ring-text"><span class="pct">{pct}%</span>'
-        f'<span class="lbl">likelihood score</span></div></div>'
-    )
-
-
-def load_json(path):
-    if path.exists():
-        with open(path, "r", encoding="utf-8") as file:
-            return json.load(file)
-    return None
-
-
-def advice_for(label):
+def advice_for(label: str) -> str:
     if label == "Likely to subscribe":
         return "Prioritise this customer: schedule a call soon and offer the term deposit."
     if label == "Borderline":
@@ -202,22 +349,72 @@ def advice_for(label):
     return "Low priority for this campaign; consider other products or a later contact."
 
 
-# --------------------------------------------------------------------------
-# Cached loaders
-# --------------------------------------------------------------------------
+def ring_html(score: float, color: str) -> str:
+    pct = int(round(score * 100))
+    return (
+        f'<div class="ring-wrap"><div class="ring" style="--p:{pct}; --c:{color}"></div>'
+        f'<div class="ring-text"><span class="pct">{pct}%</span>'
+        f'<span class="lbl">subscribe score</span></div></div>'
+    )
+
+
+def normalize_binary_target(series: pd.Series) -> pd.Series:
+    cleaned = series.astype(str).str.strip().str.lower()
+    return cleaned.map(lambda v: "yes" if v in {"1", "yes", "true"} else "no")
+
+
+def get_reference_df() -> pd.DataFrame | None:
+    if Path(REFERENCE_DATA_PATH).exists():
+        return pd.read_csv(REFERENCE_DATA_PATH)
+    if (BASE_DIR / "data" / "processed" / "X_train.csv").exists():
+        return pd.read_csv(BASE_DIR / "data" / "processed" / "X_train.csv")
+    if (BASE_DIR / "data" / "raw" / "bank.csv").exists():
+        raw_df = pd.read_csv(BASE_DIR / "data" / "raw" / "bank.csv").drop_duplicates()
+        return add_features(raw_df.drop(columns=[TARGET, "duration"], errors="ignore"))
+    rng = np.random.RandomState(42)
+    n_rows = 250
+    synth = pd.DataFrame({
+        "age": rng.normal(41.0, 10.0, n_rows).clip(18, 95).round().astype(int),
+        "job": rng.choice(OPTIONS["job"][:6], n_rows),
+        "marital": rng.choice(OPTIONS["marital"], n_rows, p=[0.6, 0.28, 0.12]),
+        "education": rng.choice(OPTIONS["education"][:3], n_rows, p=[0.15, 0.50, 0.35]),
+        "default": rng.choice(["no", "yes"], n_rows, p=[0.98, 0.02]),
+        "balance": rng.normal(1400.0, 900.0, n_rows).round(2),
+        "housing": rng.choice(["yes", "no"], n_rows, p=[0.55, 0.45]),
+        "loan": rng.choice(["no", "yes"], n_rows, p=[0.84, 0.16]),
+        "contact": rng.choice(OPTIONS["contact"], n_rows, p=[0.65, 0.07, 0.28]),
+        "day": rng.randint(1, 29, n_rows),
+        "month": rng.choice(OPTIONS["month"], n_rows),
+        "campaign": rng.poisson(2.0, n_rows) + 1,
+        "pdays": np.zeros(n_rows, dtype=int),
+        "previous": np.zeros(n_rows, dtype=int),
+        "poutcome": rng.choice(OPTIONS["poutcome"], n_rows, p=[0.80, 0.11, 0.04, 0.05]),
+        "previously_contacted": np.zeros(n_rows, dtype=int),
+    })
+    return synth
+
+
 @st.cache_resource(show_spinner=False)
-def load_model_from_path(path_str, mtime):
+def load_champion_model(path_str: str, mtime: float):
     return joblib.load(path_str)
 
 
 @st.cache_resource(show_spinner=False)
-def load_model_from_bytes(data):
+def load_model_from_bytes(data: bytes):
     return joblib.load(io.BytesIO(data))
 
 
-# --------------------------------------------------------------------------
-# UI pieces
-# --------------------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def load_reports():
+    def _read(path: Path):
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return None
+
+    return _read(SELECTION_PATH), _read(METRICS_PATH), _read(DETAILS_PATH)
+
+
 def init_state():
     for col, value in DEFAULT_VALUES.items():
         st.session_state.setdefault(f"in_{col}", value)
@@ -230,10 +427,108 @@ def apply_preset():
             st.session_state[f"in_{col}"] = value
 
 
-def render_predict_tab(model, columns, threshold):
-    st.selectbox(
-        "Quick start", list(PRESETS.keys()), key="preset", on_change=apply_preset
+# --------------------------------------------------------------------------
+# Page Setup & Sidebar
+# --------------------------------------------------------------------------
+st.set_page_config(
+    page_title="Bank Marketing MLOps Portal",
+    page_icon="🏦",
+    layout="wide",
+)
+st.markdown(CSS, unsafe_allow_html=True)
+init_state()
+
+selection, metrics, details = load_reports()
+
+with st.sidebar:
+    st.title("🏦 MLOps Platform")
+    st.caption("Automated Champion Model Serving")
+
+    if selection and "champion" in selection:
+        champ = selection["champion"]
+        crit = champ.get("criteria", {})
+        primary_metric = selection.get("primary_metric", "f1").upper()
+
+        st.subheader("🏆 Active Champion")
+        st.info(f"**Model:** {champ.get('display_name', champ.get('model_name'))}")
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.metric(f"Val {primary_metric}", f"{crit.get('validation_score_pct', 0.0):.1f}%")
+            st.metric("Latency", f"{crit.get('prediction_time_ms', 0.0):.2f} ms")
+        with col_b:
+            if metrics:
+                st.metric(f"Test {primary_metric}", f"{metrics.get('f1', 0.0) * 100:.1f}%")
+            st.metric("Size", f"{crit.get('model_size_mb', 0.0):.3f} MB")
+
+        with st.expander("Selection Rationale"):
+            st.write(champ.get("explanation", "Selected via multi-criteria rules."))
+    else:
+        st.warning("Model metadata not found. Run `dvc repro` to build.")
+
+    st.divider()
+    st.subheader("📡 Live Monitoring")
+    log_df_sidebar = load_inference_logs(INFERENCE_LOG_PATH)
+    st.metric("Logged Inferences", len(log_df_sidebar))
+
+    st.divider()
+    st.subheader("⚙️ Inference Settings")
+    threshold = st.slider(
+        "Decision threshold",
+        min_value=0.10,
+        max_value=0.90,
+        value=0.50,
+        step=0.05,
+        help="Customers scoring at or above this threshold are flagged as likely subscribers.",
     )
+    uploaded_model = st.file_uploader(
+        "Override model (.pkl)",
+        type=["pkl", "joblib"],
+        help="Optional: upload a fitted scikit-learn pipeline trained on the bank dataset.",
+    )
+    st.caption("Powered by DVC, MLflow, Optuna & Streamlit")
+
+model = None
+model_source = ""
+if uploaded_model is not None:
+    model = load_model_from_bytes(uploaded_model.getvalue())
+    model_source = f"uploaded ({uploaded_model.name})"
+elif MODEL_PATH.exists():
+    model = load_champion_model(str(MODEL_PATH), MODEL_PATH.stat().st_mtime)
+    model_source = "models/model.pkl"
+
+st.markdown(
+    '<div class="hero"><h1>🏦 Bank Marketing MLOps Production Portal</h1>'
+    "<p>Real-time term deposit propensity scoring, model lineage inspection, and statistical drift monitoring.</p></div>",
+    unsafe_allow_html=True,
+)
+
+tab_predict, tab_batch, tab_metrics, tab_monitoring = st.tabs([
+    "🔮 Live Inference",
+    "📂 Batch Scoring",
+    "📊 Model Lineage & Metrics",
+    "🛡️ Data Drift & Monitoring",
+])
+
+# ------------------ TAB 1: LIVE INFERENCE ------------------
+with tab_predict:
+    st.header("Term Deposit Subscription Prediction")
+    st.write("Enter customer attributes below (or pick a preset) to score propensity and log production traffic:")
+
+    if model is None:
+        st.error(
+            f"Champion model not found at `{MODEL_PATH}`. "
+            "Run `dvc repro` to train and select the champion model, or upload one in the sidebar."
+        )
+        st.stop()
+
+    columns = input_columns(model)
+    unsupported = [c for c in columns if c not in RAW_INPUTS]
+    if unsupported:
+        st.error(f"Model expects unsupported input columns: {unsupported}")
+        st.stop()
+
+    st.selectbox("Quick start profile", list(PRESETS.keys()), key="preset", on_change=apply_preset)
 
     with st.form("customer_form"):
         c1, c2, c3 = st.columns(3)
@@ -247,8 +542,7 @@ def render_predict_tab(model, columns, threshold):
 
         with c2:
             st.markdown('<div class="section-title">💰 Finances</div>', unsafe_allow_html=True)
-            st.number_input("Average yearly balance", min_value=-10000,
-                            max_value=200000, step=100, key="in_balance")
+            st.number_input("Average yearly balance", min_value=-10000, max_value=200000, step=100, key="in_balance")
             st.selectbox("Credit in default?", OPTIONS["default"], key="in_default")
             st.selectbox("Housing loan?", OPTIONS["housing"], key="in_housing")
             st.selectbox("Personal loan?", OPTIONS["loan"], key="in_loan")
@@ -257,243 +551,273 @@ def render_predict_tab(model, columns, threshold):
             st.markdown('<div class="section-title">📞 Campaign contact</div>', unsafe_allow_html=True)
             st.selectbox("Contact type", OPTIONS["contact"], key="in_contact")
             st.selectbox("Last contact month", OPTIONS["month"], key="in_month")
-            st.number_input("Last contact day of month", min_value=1, max_value=31,
-                            step=1, key="in_day")
-            st.number_input("Contacts in this campaign", min_value=1, max_value=60,
-                            step=1, key="in_campaign")
-            st.number_input("Days since previous campaign (-1 = never)", min_value=-1,
-                            max_value=900, step=1, key="in_pdays")
-            st.number_input("Contacts before this campaign", min_value=0, max_value=60,
-                            step=1, key="in_previous")
-            st.selectbox("Outcome of previous campaign", OPTIONS["poutcome"],
-                         key="in_poutcome")
+            st.number_input("Last contact day of month", min_value=1, max_value=31, step=1, key="in_day")
+            st.number_input("Contacts in this campaign", min_value=1, max_value=60, step=1, key="in_campaign")
+            st.number_input("Days since previous campaign (-1 = never)", min_value=-1, max_value=900, step=1, key="in_pdays")
+            st.number_input("Contacts before this campaign", min_value=0, max_value=60, step=1, key="in_previous")
+            st.selectbox("Outcome of previous campaign", OPTIONS["poutcome"], key="in_poutcome")
 
-        submitted = st.form_submit_button("🔮 Predict")
+        submitted = st.form_submit_button("🔮 Predict & Log Inference", type="primary")
 
-    if not submitted:
-        st.info("Fill in the customer details (or pick an example) and press **Predict**.")
-        return
+    if submitted:
+        row = {col: st.session_state[f"in_{col}"] for col in columns}
+        X = prepare(pd.DataFrame([row]), model)
+        scores, is_prob = score_positive(model, X)
+        score = float(scores[0])
+        pred_label = "yes" if score >= threshold else "no"
+        label, color = verdict_for(score, threshold)
 
-    row = {col: st.session_state[f"in_{col}"] for col in columns}
-    X = prepare(pd.DataFrame([row]), model)
-    scores, is_prob = score_positive(model, X)
-    score = float(scores[0])
-    label, color = verdict_for(score, threshold)
+        proba_dict = {"No": round(1.0 - score, 4), "Yes": round(score, 4)}
+        try:
+            log_inference(X, pred_label, proba_dict, log_path=INFERENCE_LOG_PATH)
+        except Exception as exc:
+            st.warning(f"Prediction succeeded, but logging failed: {exc}")
 
-    st.markdown("---")
-    left, right = st.columns([1, 1.4])
-    with left:
-        st.markdown(ring_html(score, color), unsafe_allow_html=True)
-    with right:
-        st.markdown(
-            f'<span class="badge" style="background:{color}">{label}</span>',
-            unsafe_allow_html=True,
-        )
-        st.markdown(f"#### {advice_for(label)}")
-        st.markdown(
-            f'<p class="small-note">Decision threshold: {threshold:.0%}. '
-            f'{"" if is_prob else "This model has no probability output, so the score is a scaled decision value. "}'
-            "Scores are model likelihoods, not calibrated probabilities.</p>",
-            unsafe_allow_html=True,
-        )
-    with st.expander("See the submitted profile"):
-        st.dataframe(X.T.rename(columns={0: "value"}).astype(str))
-
-
-def render_batch_tab(model, columns, threshold):
-    st.markdown("Score many customers at once. Upload a CSV with these columns:")
-    st.code(", ".join(columns), language="text")
-
-    template = pd.DataFrame([{c: DEFAULT_VALUES[c] for c in columns}])
-    st.download_button(
-        "⬇️ Download CSV template",
-        template.to_csv(index=False).encode("utf-8"),
-        file_name="bank_template.csv",
-        mime="text/csv",
-    )
-
-    upload = st.file_uploader("Upload customers (CSV)", type=["csv"], key="batch_upload")
-    if upload is None:
-        return
-
-    df = pd.read_csv(upload)
-    missing = [c for c in columns if c not in df.columns]
-    if missing:
-        st.error(f"Missing required columns: {missing}")
-        return
-
-    X = prepare(df[columns], model)
-    scores, _ = score_positive(model, X)
-    out = df.copy()
-    out["likelihood_score"] = np.round(scores, 4)
-    out["prediction"] = np.where(scores >= threshold, POSITIVE_LABEL, "no")
-
-    n_yes = int((out["prediction"] == POSITIVE_LABEL).sum())
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Customers scored", f"{len(out):,}")
-    m2.metric("Predicted subscribers", f"{n_yes:,}")
-    m3.metric("Share of customers", f"{n_yes / len(out):.1%}")
-
-    if TARGET in out.columns:
-        actual = out[TARGET].astype(str)
-        m4, m5 = st.columns(2)
-        m4.metric("Accuracy vs actual", f"{accuracy_score(actual, out['prediction']):.3f}")
-        m5.metric("F1 (yes) vs actual",
-                  f"{f1_score(actual, out['prediction'], pos_label=POSITIVE_LABEL):.3f}")
-
-    out = out.sort_values("likelihood_score", ascending=False).reset_index(drop=True)
-    st.dataframe(
-        out,
-        column_config={
-            "likelihood_score": st.column_config.ProgressColumn(
-                "Likelihood score", min_value=0.0, max_value=1.0, format="%.2f"
+        st.markdown("---")
+        left, mid, right = st.columns([1, 1.3, 1.1])
+        with left:
+            st.markdown(ring_html(score, color), unsafe_allow_html=True)
+        with mid:
+            st.markdown(
+                f'<span class="badge" style="background:{color}">{label}</span>',
+                unsafe_allow_html=True,
             )
-        },
-    )
-    st.download_button(
-        "⬇️ Download predictions",
-        out.to_csv(index=False).encode("utf-8"),
-        file_name="bank_predictions.csv",
-        mime="text/csv",
-    )
+            st.markdown(f"#### {advice_for(label)}")
+            st.markdown(
+                f'<p class="small-note">Source: <code>{model_source}</code> | Threshold: {threshold:.0%}. '
+                f'{"" if is_prob else "Score is a sigmoid-scaled decision value. "}'
+                "Request logged for drift monitoring.</p>",
+                unsafe_allow_html=True,
+            )
+        with right:
+            st.write("##### Class Likelihoods")
+            proba_df = pd.DataFrame(
+                list(proba_dict.items()), columns=["Outcome", "Probability"]
+            ).set_index("Outcome")
+            st.bar_chart(proba_df)
 
+        with st.expander("Inspect Engineered Feature Payload"):
+            st.dataframe(X.T.rename(columns={0: "value"}).astype(str))
 
-def render_performance_tab():
-    metrics = load_json(METRICS_PATH)
-    details = load_json(DETAILS_PATH)
-
-    if not metrics or not details:
-        st.info(
-            "No evaluation results found. Run `dvc repro` to train and evaluate the "
-            "models; it creates `reports/metrics.json` and `reports/evaluation_details.json`."
-        )
-        return
-
-    st.markdown(f"### 🏆 Champion model: **{details['champion_model']}**")
-    st.caption(details.get("selection_explanation", ""))
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("F1 (yes)", f"{metrics['f1']:.3f}")
-    c2.metric("ROC-AUC", f"{metrics['roc_auc']:.3f}")
-    c3.metric("Accuracy", f"{metrics['accuracy']:.3f}")
-    c4.metric("Precision", f"{metrics['precision']:.3f}")
-    c5.metric("Recall", f"{metrics['recall']:.3f}")
-
-    all_models = pd.DataFrame(details["all_models_test_metrics"]).T
-    left, right = st.columns(2)
-    with left:
-        st.markdown("#### Test F1 by model")
-        st.bar_chart(all_models[["f1"]])
-    with right:
-        st.markdown("#### Confusion matrix (test set)")
-        cm = details["champion_confusion_matrix"]
-        cm_df = pd.DataFrame(
-            [[cm["true_negative"], cm["false_positive"]],
-             [cm["false_negative"], cm["true_positive"]]],
-            index=["Actual: no", "Actual: yes"],
-            columns=["Predicted: no", "Predicted: yes"],
-        )
-        st.dataframe(cm_df)
-        st.caption("Correct predictions are on the diagonal.")
-
-    st.markdown("#### All models: test metrics")
-    st.dataframe(all_models.round(4))
-
-    st.markdown("#### Selection criteria (training data only)")
-    st.dataframe(pd.DataFrame(details["selection_comparison"]).T)
-
-
-def render_about_tab():
-    st.markdown(
-        """
-### About this app
-This tool estimates how likely a customer is to subscribe to a **term deposit**
-after a bank marketing call, using the champion model from the training pipeline.
-
-**How to use it**
-1. **Predict**: enter one customer and get a likelihood score and recommendation.
-2. **Batch**: upload a CSV to score a whole call list and download the results.
-3. **Model performance**: see how the champion did on held-out test data.
-
-**Good to know**
-- Scores are model likelihoods, not calibrated probabilities. Use the threshold in
-  the sidebar to decide how selective the campaign should be.
-- Call duration is **not** used. It is only known after the call, so the model
-  only uses information available before calling.
-- Predictions support human decisions; they do not replace them.
-        """
-    )
-
-
-# --------------------------------------------------------------------------
-# Main
-# --------------------------------------------------------------------------
-def main():
-    st.set_page_config(page_title="Bank Marketing Predictor", page_icon="🏦", layout="wide")
-    st.markdown(CSS, unsafe_allow_html=True)
-    init_state()
-
-    st.markdown(
-        '<div class="hero"><h1>🏦 Bank Marketing Campaign Predictor</h1>'
-        "<p>Find the customers most likely to subscribe to a term deposit.</p></div>",
-        unsafe_allow_html=True,
-    )
-
-    # ---- Sidebar: model + settings ----
-    st.sidebar.header("⚙️ Settings")
-    uploaded_model = st.sidebar.file_uploader(
-        "Use a different model (.pkl)", type=["pkl", "joblib"],
-        help="Upload a fitted scikit-learn pipeline trained on the bank dataset.",
-    )
-
-    model = None
-    model_source = ""
-    if uploaded_model is not None:
-        model = load_model_from_bytes(uploaded_model.getvalue())
-        model_source = f"uploaded file ({uploaded_model.name})"
-    elif MODEL_PATH.exists():
-        model = load_model_from_path(str(MODEL_PATH), MODEL_PATH.stat().st_mtime)
-        model_source = str(MODEL_PATH)
-
+# ------------------ TAB 2: BATCH SCORING ------------------
+with tab_batch:
+    st.header("Batch Campaign Scoring")
     if model is None:
-        st.warning(
-            f"No trained model found at `{MODEL_PATH}`. Run `dvc repro` to create it, "
-            "or upload a model in the sidebar."
+        st.warning("Load or train a model first.")
+    else:
+        columns = input_columns(model)
+        st.markdown("Upload a customer CSV containing these required columns:")
+        st.code(", ".join(columns), language="text")
+
+        template = pd.DataFrame([{c: DEFAULT_VALUES[c] for c in columns}])
+        st.download_button(
+            "⬇️ Download CSV template",
+            template.to_csv(index=False).encode("utf-8"),
+            file_name="bank_template.csv",
+            mime="text/csv",
         )
-        st.stop()
 
-    columns = input_columns(model)
-    unsupported = [c for c in columns if c not in RAW_INPUTS]
-    if unsupported:
-        st.error(
-            f"This model expects columns the form does not provide: {unsupported}. "
-            "Retrain with the project pipeline or upload a compatible model."
-        )
-        st.stop()
+        upload = st.file_uploader("Upload customers (CSV)", type=["csv"], key="batch_upload")
+        if upload is not None:
+            df = pd.read_csv(upload)
+            missing = [c for c in columns if c not in df.columns]
+            if missing:
+                st.error(f"Missing required columns: {missing}")
+            else:
+                X = prepare(df[columns], model)
+                scores, _ = score_positive(model, X)
+                out = df.copy()
+                out["likelihood_score"] = np.round(scores, 4)
+                out["prediction"] = np.where(scores >= threshold, POSITIVE_LABEL, "no")
 
-    threshold = st.sidebar.slider(
-        "Decision threshold", 0.10, 0.90, 0.50, 0.05,
-        help="Customers scoring at or above this are flagged as likely subscribers.",
-    )
+                for i in range(min(len(X), 500)):
+                    s_i = float(scores[i])
+                    log_inference(
+                        X.iloc[[i]],
+                        out["prediction"].iloc[i],
+                        {"No": round(1.0 - s_i, 4), "Yes": round(s_i, 4)},
+                        log_path=INFERENCE_LOG_PATH,
+                    )
 
-    details = load_json(DETAILS_PATH)
+                n_yes = int((out["prediction"] == POSITIVE_LABEL).sum())
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Customers scored", f"{len(out):,}")
+                m2.metric("Predicted subscribers", f"{n_yes:,}")
+                m3.metric("Predicted conversion rate", f"{n_yes / len(out):.1%}")
+
+                if TARGET in out.columns:
+                    actual = normalize_binary_target(out[TARGET])
+                    m4, m5 = st.columns(2)
+                    m4.metric("Accuracy vs actual", f"{accuracy_score(actual, out['prediction']):.3f}")
+                    m5.metric(
+                        "F1 (yes) vs actual",
+                        f"{f1_score(actual, out['prediction'], pos_label=POSITIVE_LABEL):.3f}",
+                    )
+
+                out = out.sort_values("likelihood_score", ascending=False).reset_index(drop=True)
+                st.dataframe(
+                    out,
+                    column_config={
+                        "likelihood_score": st.column_config.ProgressColumn(
+                            "Likelihood score", min_value=0.0, max_value=1.0, format="%.2f"
+                        )
+                    },
+                )
+                st.download_button(
+                    "⬇️ Download predictions",
+                    out.to_csv(index=False).encode("utf-8"),
+                    file_name="bank_predictions.csv",
+                    mime="text/csv",
+                )
+
+# ------------------ TAB 3: MODEL LINEAGE & METRICS ------------------
+with tab_metrics:
+    st.header("Model Lineage & Multi-Criteria Benchmark")
+    st.write("All 6 candidate models were tuned with Optuna and evaluated across 6 criteria to select the champion:")
+
+    if metrics:
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Test F1 (yes)", f"{metrics.get('f1', 0.0):.3f}")
+        c2.metric("Test ROC-AUC", f"{metrics.get('roc_auc', 0.0):.3f}")
+        c3.metric("Test Accuracy", f"{metrics.get('accuracy', 0.0):.3f}")
+        c4.metric("Test Precision", f"{metrics.get('precision', 0.0):.3f}")
+        c5.metric("Test Recall", f"{metrics.get('recall', 0.0):.3f}")
+
+    if COMPARISON_CSV_PATH.exists():
+        st.subheader("Candidate Model Comparison (CV & Runtime Criteria)")
+        comp_df = pd.read_csv(COMPARISON_CSV_PATH)
+        st.dataframe(comp_df, use_container_width=True)
+    elif selection:
+        st.json(selection)
+
     if details:
-        st.sidebar.success(f"Champion: {details['champion_model']}")
-    st.sidebar.caption(f"Model source: {model_source}")
-    st.sidebar.caption(f"{len(columns)} input features")
+        all_models = pd.DataFrame(details["all_models_test_metrics"]).T
+        left, right = st.columns(2)
+        with left:
+            st.subheader("Held-Out Test F1 by Model")
+            st.bar_chart(all_models[["f1"]])
+        with right:
+            st.subheader("Champion Confusion Matrix (Test Set)")
+            cm = details["champion_confusion_matrix"]
+            cm_df = pd.DataFrame(
+                [
+                    [cm["true_negative"], cm["false_positive"]],
+                    [cm["false_negative"], cm["true_positive"]],
+                ],
+                index=["Actual: no", "Actual: yes"],
+                columns=["Predicted: no", "Predicted: yes"],
+            )
+            st.dataframe(cm_df)
 
-    tab_predict, tab_batch, tab_perf, tab_about = st.tabs(
-        ["🔮 Predict", "📂 Batch", "📊 Model performance", "ℹ️ About"]
+        st.subheader("All Models: Held-Out Test Metrics")
+        st.dataframe(all_models.round(4), use_container_width=True)
+    elif not COMPARISON_CSV_PATH.exists() and not metrics:
+        st.info("Run `dvc repro` to generate model lineage and evaluation reports.")
+
+# ------------------ TAB 4: DATA DRIFT & MONITORING ------------------
+with tab_monitoring:
+    st.header("Production Data Drift & Quality Monitoring")
+    st.write(
+        "Monitoring production inputs against the reference training dataset using "
+        "**Kolmogorov-Smirnov (numeric)** and **Chi-Square (categorical)** two-sample tests."
     )
-    with tab_predict:
-        render_predict_tab(model, columns, threshold)
-    with tab_batch:
-        render_batch_tab(model, columns, threshold)
-    with tab_perf:
-        render_performance_tab()
-    with tab_about:
-        render_about_tab()
 
+    log_df = load_inference_logs(INFERENCE_LOG_PATH)
+    ref_df = get_reference_df()
 
-if __name__ == "__main__":
-    main()
+    col_btn1, col_btn2, col_btn3, col_btn4 = st.columns([1.2, 1.9, 1.9, 1.2])
+    with col_btn1:
+        run_check = st.button(
+            "Run Drift Check",
+            type="primary",
+            disabled=log_df.empty,
+            help="Requires at least 1 logged inference.",
+        )
+    with col_btn2:
+        seed_clean = st.button(
+            "🧪 Log 100 Clean Requests",
+            disabled=(model is None or ref_df is None),
+            help="Sample 100 baseline customer profiles from training distribution.",
+        )
+    with col_btn3:
+        seed_drift = st.button(
+            "🚨 Simulate 100 Drifted",
+            disabled=(model is None or ref_df is None),
+            help="Synthesize 100 shifted customer profiles to test drift detection.",
+        )
+    with col_btn4:
+        clear_logs = st.button(
+            "🗑️ Clear Logs",
+            disabled=log_df.empty,
+            help="Delete reports/inference_logs.csv to reset monitoring.",
+        )
+
+    if clear_logs:
+        log_path = Path(INFERENCE_LOG_PATH)
+        if log_path.exists():
+            log_path.unlink()
+        st.rerun()
+
+    if (seed_clean or seed_drift) and model is not None and ref_df is not None:
+        sample_X = generate_sample_production_data(
+            ref_df, simulate_drift=bool(seed_drift), n_samples=100, seed=42
+        )
+        sample_X = prepare(sample_X, model)
+        scores, _ = score_positive(model, sample_X)
+        for i in range(len(sample_X)):
+            s_i = float(scores[i])
+            pred_i = "yes" if s_i >= threshold else "no"
+            log_inference(
+                sample_X.iloc[[i]],
+                pred_i,
+                {"No": round(1.0 - s_i, 4), "Yes": round(s_i, 4)},
+                log_path=INFERENCE_LOG_PATH,
+            )
+        st.rerun()
+
+    if not log_df.empty:
+        st.write(f"**Total production records logged:** `{len(log_df)}`")
+
+        if run_check or len(log_df) >= 5:
+            if ref_df is not None:
+                try:
+                    report = analyze_drift(ref_df, log_df)
+
+                    status_color = "red" if report["dataset_drift_detected"] else "green"
+                    status_msg = "⚠️ DRIFT DETECTED" if report["dataset_drift_detected"] else "✅ HEALTHY DISTRIBUTION"
+
+                    st.markdown(f"#### Status: :{status_color}[{status_msg}]")
+                    st.write(
+                        f"Drifted features: **{report['drifted_features']} / {report['total_features']}** "
+                        f"({report['drift_share_pct']}%)"
+                    )
+
+                    drift_rows = []
+                    for feat, d in report["features"].items():
+                        stat_val = d.get("ks_statistic", d.get("chi2_statistic", d.get("statistic", 0.0)))
+                        ref_mean = d.get("reference_mean")
+                        cur_mean = d.get("current_mean")
+                        shift = d.get("mean_shift")
+                        drift_rows.append({
+                            "Feature": feat,
+                            "Test": d.get("test_name", "KS / Chi2"),
+                            "Status": "DRIFT ⚠️" if d["drift_detected"] else "HEALTHY ✅",
+                            "p-value": round(float(d["p_value"]), 4),
+                            "Statistic": round(float(stat_val), 4) if stat_val is not None else "N/A",
+                            "Reference Mean": round(float(ref_mean), 2) if ref_mean is not None else "Categorical",
+                            "Production Mean": round(float(cur_mean), 2) if cur_mean is not None else "Categorical",
+                            "Mean Shift": round(float(shift), 2) if shift is not None else "N/A",
+                        })
+                    st.dataframe(pd.DataFrame(drift_rows), use_container_width=True)
+                except Exception as exc:
+                    st.error(f"Drift analysis failed: {exc}")
+            else:
+                st.info("Reference dataset not found (`data/processed/X_train.csv` or `data/raw/bank.csv`).")
+
+        with st.expander("View Recent Production Logs (Last 10 Requests)"):
+            st.dataframe(log_df.tail(10), use_container_width=True)
+    else:
+        st.info(
+            "No production inferences logged yet. Submit predictions in **Live Inference**, "
+            "upload a CSV in **Batch Scoring**, or click **🧪 Log 100 Clean Requests** above."
+        )
