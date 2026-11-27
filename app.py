@@ -260,8 +260,6 @@ DERIVED = [
 ]
 ALLOWED_COLUMNS = set(RAW_INPUTS) | set(DERIVED)
 
-# High-value inputs shown in the form (lower-priority/noisy fields like day,
-# default, pdays, and previous are omitted from the UI and defaulted cleanly).
 CORE_FORM_INPUTS = [
     "age", "job", "marital", "education",
     "balance", "housing", "loan",
@@ -702,6 +700,13 @@ def get_reference_df() -> pd.DataFrame | None:
     }))
 
 
+def _file_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime if path.exists() else -1.0
+    except OSError:
+        return -1.0
+
+
 @st.cache_resource(show_spinner=False)
 def load_champion_model(path_str: str, mtime: float):
     return joblib.load(path_str)
@@ -713,14 +718,31 @@ def load_model_from_bytes(data: bytes):
 
 
 @st.cache_data(show_spinner=False)
-def load_reports():
-    def _read(path: Path):
-        if path.exists():
+def load_reports(
+    selection_path_str: str,
+    selection_mtime: float,
+    metrics_path_str: str,
+    metrics_mtime: float,
+    details_path_str: str,
+    details_mtime: float,
+):
+    def _read(path_str: str, mtime: float):
+        if mtime < 0:
+            return None
+        path = Path(path_str)
+        if not path.exists():
+            return None
+        try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        return None
+        except Exception:
+            return None
 
-    return _read(SELECTION_PATH), _read(METRICS_PATH), _read(DETAILS_PATH)
+    return (
+        _read(selection_path_str, selection_mtime),
+        _read(metrics_path_str, metrics_mtime),
+        _read(details_path_str, details_mtime),
+    )
 
 
 def init_state():
@@ -746,27 +768,36 @@ st.set_page_config(
 st.markdown(CSS, unsafe_allow_html=True)
 init_state()
 
-selection, metrics, details = load_reports()
+selection, metrics, details = load_reports(
+    str(SELECTION_PATH),
+    _file_mtime(SELECTION_PATH),
+    str(METRICS_PATH),
+    _file_mtime(METRICS_PATH),
+    str(DETAILS_PATH),
+    _file_mtime(DETAILS_PATH),
+)
 
 with st.sidebar:
     st.title("🏦 MLOps Studio")
     st.caption("Term Deposit Propensity & Drift Suite")
 
-    if selection and "champion" in selection:
+    if isinstance(selection, dict) and isinstance(selection.get("champion"), dict):
         champ = selection["champion"]
         crit = champ.get("criteria", {})
-        primary_metric = selection.get("primary_metric", "f1").upper()
+        raw_metric = str(selection.get("primary_metric", "f1")).lower()
+        metric_short = "ACC" if raw_metric == "accuracy" else raw_metric.upper()
 
         st.subheader("🏆 Active Champion")
-        st.success(f"**{champ.get('display_name', champ.get('model_name'))}**")
+        st.success(f"**{champ.get('display_name', champ.get('model_name', 'Champion'))}**")
 
         col_a, col_b = st.columns(2)
         with col_a:
-            st.metric(f"Val {primary_metric}", f"{crit.get('validation_score_pct', 0.0):.1f}%")
+            st.metric(f"Val {metric_short}", f"{crit.get('validation_score_pct', 0.0):.1f}%")
             st.metric("Latency", f"{crit.get('prediction_time_ms', 0.0):.2f} ms")
         with col_b:
-            if metrics:
-                st.metric(f"Test {primary_metric}", f"{metrics.get('f1', 0.0) * 100:.1f}%")
+            if isinstance(metrics, dict):
+                test_val = metrics.get("accuracy" if raw_metric == "accuracy" else "f1", 0.0)
+                st.metric(f"Test {metric_short}", f"{float(test_val) * 100:.1f}%")
             st.metric("Size", f"{crit.get('model_size_mb', 0.0):.3f} MB")
 
         with st.expander("Selection Rationale"):
@@ -802,7 +833,7 @@ if uploaded_model is not None:
     model = load_model_from_bytes(uploaded_model.getvalue())
     model_source = f"uploaded ({uploaded_model.name})"
 elif MODEL_PATH.exists():
-    model = load_champion_model(str(MODEL_PATH), MODEL_PATH.stat().st_mtime)
+    model = load_champion_model(str(MODEL_PATH), _file_mtime(MODEL_PATH))
     model_source = "models/model.pkl"
 
 st.markdown(
