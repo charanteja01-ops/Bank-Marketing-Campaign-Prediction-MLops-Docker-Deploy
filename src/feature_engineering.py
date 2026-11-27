@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import yaml
 
@@ -11,24 +12,128 @@ X_TEST_PATH = Path("data/processed/X_test.csv")
 Y_TRAIN_PATH = Path("data/processed/y_train.csv")
 Y_TEST_PATH = Path("data/processed/y_test.csv")
 
+MONTH_MAP = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4,
+    "may": 5, "jun": 6, "jul": 7, "aug": 8,
+    "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+EDUCATION_RANK = {
+    "unknown": 0,
+    "illiterate": 0,
+    "primary": 1,
+    "secondary": 2,
+    "tertiary": 3,
+}
 
-def add_features(X):
-    """Row-wise, stateless transformations only (nothing is learned from the
-    data), so applying them to train and test separately cannot leak.
 
-    pdays is -1 (bank-full) or 999 (bank-additional) when the client was never
-    contacted before. That sentinel would distort scaling, so we expose it as a
-    clean flag and set pdays to 0 for those rows.
-    """
+def add_features(X: pd.DataFrame) -> pd.DataFrame:
+    """Row-wise, stateless domain and interaction features (zero data leakage)."""
     X = X.copy()
+
+    # 1. Contact history & pdays sentinel cleanup
     if "pdays" in X.columns:
-        contacted = ~X["pdays"].isin([-1, 999])
+        pdays_num = pd.to_numeric(X["pdays"], errors="coerce").fillna(-1)
+        contacted = ~pdays_num.isin([-1, 999])
         X["previously_contacted"] = contacted.astype(int)
-        X["pdays"] = X["pdays"].where(contacted, 0)
+        X["pdays"] = pd.to_numeric(X["pdays"], errors="coerce").where(contacted, 0)
+        X["pdays_clean"] = pd.to_numeric(X["pdays"], errors="coerce").where(contacted, 0)
+        X["recent_contact_30d"] = (contacted & (X["pdays_clean"] <= 30)).astype(int)
+
+    # 2. Loan & debt indicators
+    has_housing = (
+        X["housing"].astype(str).str.strip().str.lower().eq("yes")
+        if "housing" in X.columns
+        else pd.Series(False, index=X.index)
+    )
+    has_personal = (
+        X["loan"].astype(str).str.strip().str.lower().eq("yes")
+        if "loan" in X.columns
+        else pd.Series(False, index=X.index)
+    )
+    if "housing" in X.columns or "loan" in X.columns:
+        X["has_any_loan"] = (has_housing | has_personal).astype(int)
+        X["has_both_loans"] = (has_housing & has_personal).astype(int)
+        X["debt_free"] = ((~has_housing) & (~has_personal)).astype(int)
+
+    # 3. Account balance transforms & age ratios
+    if "balance" in X.columns:
+        bal = pd.to_numeric(X["balance"], errors="coerce").fillna(0.0)
+        X["balance_is_negative"] = (bal < 0).astype(int)
+        X["signed_log_balance"] = np.sign(bal) * np.log1p(np.abs(bal))
+
+        if "age" in X.columns:
+            age = pd.to_numeric(X["age"], errors="coerce").fillna(40.0)
+            X["balance_to_age_ratio"] = (bal / (age.clip(lower=18.0) + 1.0)).round(4)
+
+    # 4. Age grouping & low-susceptibility demographic flag
+    if "age" in X.columns:
+        age = pd.to_numeric(X["age"], errors="coerce").fillna(40.0)
+        X["age_group"] = pd.cut(
+            age,
+            bins=[0, 29, 59, 120],
+            labels=["young", "working_age", "senior"],
+            include_lowest=True,
+        ).astype(str)
+
+    if "job" in X.columns:
+        job_clean = X["job"].astype(str).str.strip().str.lower()
+        X["is_student_or_retired"] = job_clean.isin(["student", "retired"]).astype(int)
+        X["is_blue_collar_or_admin"] = job_clean.isin(["blue-collar", "admin."]).astype(int)
+
+    # 5. Ordinal education & campaign effort ratios
+    if "education" in X.columns:
+        edu_clean = X["education"].astype(str).str.strip().str.lower()
+        X["education_ordinal"] = edu_clean.map(EDUCATION_RANK).fillna(0).astype(int)
+
+    if "campaign" in X.columns:
+        camp = pd.to_numeric(X["campaign"], errors="coerce").fillna(1.0).clip(lower=1.0)
+        X["log_campaign"] = np.log1p(camp)
+        X["heavy_campaign_calls"] = (camp >= 4).astype(int)
+
+        if "previous" in X.columns:
+            prev = pd.to_numeric(X["previous"], errors="coerce").fillna(0.0).clip(lower=0.0)
+            X["total_contacts"] = camp + prev
+            X["campaign_to_total_ratio"] = (camp / (camp + prev + 1.0)).round(4)
+
+    # 6. Cyclical month & day encoding
+    if "month" in X.columns:
+        month_num = (
+            X["month"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .str[:3]
+            .map(MONTH_MAP)
+            .fillna(5)
+        )
+        X["month_sin"] = np.sin(2.0 * np.pi * month_num / 12.0).round(6)
+        X["month_cos"] = np.cos(2.0 * np.pi * month_num / 12.0).round(6)
+
+    if "day" in X.columns:
+        day_num = pd.to_numeric(X["day"], errors="coerce").fillna(15).clip(1, 31)
+        X["day_sin"] = np.sin(2.0 * np.pi * day_num / 31.0).round(6)
+        X["day_cos"] = np.cos(2.0 * np.pi * day_num / 31.0).round(6)
+
+    # 7. High-signal interaction features
+    if "poutcome" in X.columns:
+        pout = X["poutcome"].astype(str).str.strip().str.lower()
+        X["prev_outcome_success"] = pout.eq("success").astype(int)
+        if "campaign" in X.columns:
+            camp = pd.to_numeric(X["campaign"], errors="coerce").fillna(1.0)
+            X["success_per_campaign_call"] = (
+                X["prev_outcome_success"] / (camp.clip(lower=1.0))
+            ).round(4)
+
+    if "balance" in X.columns and "has_any_loan" in X.columns:
+        bal = pd.to_numeric(X["balance"], errors="coerce").fillna(0.0)
+        X["loan_free_positive_balance"] = (
+            (X["has_any_loan"] == 0) & (bal > 0)
+        ).astype(int)
+
     return X
 
 
-def transform_split(input_path, target, drop_columns):
+def transform_split(input_path: Path, target: str, drop_columns: list[str]):
     data = pd.read_csv(input_path)
 
     if target not in data.columns:
@@ -67,7 +172,7 @@ def main():
     print("Feature engineering and target separation completed.")
     print(f"Dropped columns: {drop_columns}")
     print(f"X_train: {X_train.shape}, X_test: {X_test.shape}")
-    print(f"Features: {list(X_train.columns)}")
+    print(f"Features ({len(X_train.columns)}): {list(X_train.columns)}")
     print(f"Saved split files under: {X_TRAIN_PATH.parent}")
 
 

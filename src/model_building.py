@@ -1,12 +1,10 @@
 """Model building with automated multi-criteria champion selection
 (Bank Marketing Campaign Prediction).
 
-Step 1  Train all six models (Optuna search + stratified CV per model).
+Step 1  Train all candidate models (Optuna search + stratified CV per model).
 Step 2  Measure six criteria per model:
         model size (MB), training time (s), prediction time (ms),
         training score (%), validation score (%), score gap (pp).
-        The "score" is the primary metric in params.yaml (default F1) because
-        the data is imbalanced and accuracy would be misleading.
 Step 3  Apply selection rules:
         - score gap must be strictly below the configured threshold
         - higher validation score preferred
@@ -22,7 +20,6 @@ import shutil
 import time
 import warnings
 
-# Set before importing scikit-learn/joblib components.
 os.environ.setdefault("LOKY_MAX_CPU_COUNT", "4")
 
 import joblib
@@ -44,6 +41,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MinMaxScaler, OneHotEncoder, StandardScaler
 from sklearn.tree import DecisionTreeClassifier
+from xgboost import XGBClassifier
 
 warnings.filterwarnings("ignore")
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -56,8 +54,6 @@ SELECTION_PATH = REPORTS_DIR / "model_selection.json"
 COMPARISON_CSV_PATH = REPORTS_DIR / "model_comparison.csv"
 COMPARISON_MD_PATH = REPORTS_DIR / "model_comparison.md"
 
-# SVC is replaced by LogisticRegression: kernel SVMs scale ~O(n^2) and are far
-# too slow for ~40k rows x CV x Optuna trials.
 MODEL_NAMES = [
     "KNN",
     "DecisionTree",
@@ -65,6 +61,7 @@ MODEL_NAMES = [
     "GaussianNB",
     "RandomForest",
     "GradientBoosting",
+    "XGBoost",
 ]
 DISPLAY_NAMES = {
     "KNN": "KNN",
@@ -73,58 +70,89 @@ DISPLAY_NAMES = {
     "GaussianNB": "Gaussian NB",
     "RandomForest": "Random Forest",
     "GradientBoosting": "Gradient Boosting",
+    "XGBoost": "XGBoost",
 }
 
 
-# --------------------------------------------------------------------------
-# Search space / pipeline construction
-# --------------------------------------------------------------------------
-def suggest_params(model_name, trial):
+def suggest_params(model_name, trial, neg_pos_ratio=1.0):
     scaler_type = trial.suggest_categorical("scaler_type", ["standard", "minmax"])
 
     if model_name == "KNN":
+        metric = trial.suggest_categorical("metric", ["minkowski", "manhattan", "chebyshev"])
         params = {
-            "n_neighbors": trial.suggest_int("n_neighbors", 5, 51, step=2),
+            "n_neighbors": trial.suggest_int("n_neighbors", 3, 61, step=2),
             "weights": trial.suggest_categorical("weights", ["uniform", "distance"]),
-            "p": trial.suggest_int("p", 1, 2),
+            "metric": metric,
+            "p": trial.suggest_int("p", 1, 3) if metric == "minkowski" else 2,
+            "leaf_size": trial.suggest_int("leaf_size", 15, 60, step=5),
         }
     elif model_name == "DecisionTree":
         params = {
             "criterion": trial.suggest_categorical("criterion", ["gini", "entropy", "log_loss"]),
-            "max_depth": trial.suggest_int("max_depth", 2, 30),
-            "min_samples_split": trial.suggest_int("min_samples_split", 2, 50),
-            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 50),
+            "splitter": trial.suggest_categorical("splitter", ["best", "random"]),
+            "max_depth": trial.suggest_int("max_depth", 2, 35),
+            "min_samples_split": trial.suggest_int("min_samples_split", 2, 60),
+            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 60),
             "max_features": trial.suggest_categorical("max_features", [None, "sqrt", "log2"]),
             "class_weight": trial.suggest_categorical("class_weight", [None, "balanced"]),
+            "ccp_alpha": trial.suggest_float("ccp_alpha", 0.0, 0.02),
         }
     elif model_name == "LogisticRegression":
+        solver = trial.suggest_categorical("solver", ["lbfgs", "liblinear", "saga"])
         params = {
-            "C": trial.suggest_float("C", 1e-3, 1e2, log=True),
+            "C": trial.suggest_float("C", 1e-4, 1e3, log=True),
+            "solver": solver,
             "class_weight": trial.suggest_categorical("class_weight", [None, "balanced"]),
         }
+        if solver == "saga":
+            params["l1_ratio"] = trial.suggest_float("l1_ratio", 0.0, 1.0)
     elif model_name == "GaussianNB":
         params = {
-            "var_smoothing": trial.suggest_float("var_smoothing", 1e-11, 1e-1, log=True)
+            "var_smoothing": trial.suggest_float("var_smoothing", 1e-12, 1e-1, log=True)
         }
     elif model_name == "RandomForest":
+        bootstrap = trial.suggest_categorical("bootstrap", [True, False])
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 100, 400, step=50),
+            "n_estimators": trial.suggest_int("n_estimators", 100, 600, step=50),
             "criterion": trial.suggest_categorical("criterion", ["gini", "entropy", "log_loss"]),
-            "max_depth": trial.suggest_int("max_depth", 5, 30),
-            "min_samples_split": trial.suggest_int("min_samples_split", 2, 50),
-            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 50),
+            "max_depth": trial.suggest_int("max_depth", 3, 30),
+            "min_samples_split": trial.suggest_int("min_samples_split", 2, 60),
+            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 60),
             "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2", None]),
-            "class_weight": trial.suggest_categorical("class_weight", [None, "balanced"]),
+            "bootstrap": bootstrap,
+            "max_samples": trial.suggest_float("max_samples", 0.5, 1.0) if bootstrap else None,
+            "class_weight": trial.suggest_categorical("class_weight", [None, "balanced"]) if bootstrap else None,
+            "ccp_alpha": trial.suggest_float("ccp_alpha", 0.0, 0.01),
         }
     elif model_name == "GradientBoosting":
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 100, 400, step=50),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+            "loss": trial.suggest_categorical("loss", ["log_loss", "exponential"]),
+            "n_estimators": trial.suggest_int("n_estimators", 100, 600, step=50),
+            "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.25, log=True),
             "max_depth": trial.suggest_int("max_depth", 2, 8),
-            "min_samples_split": trial.suggest_int("min_samples_split", 2, 50),
-            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 50),
-            "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2", None]),
+            "min_samples_split": trial.suggest_int("min_samples_split", 2, 60),
+            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 60),
+            "max_features": trial.suggest_categorical("max_features", [None, "sqrt", "log2"]),
             "subsample": trial.suggest_float("subsample", 0.5, 1.0),
+            "ccp_alpha": trial.suggest_float("ccp_alpha", 0.0, 0.01),
+        }
+    elif model_name == "XGBoost":
+        sqrt_ratio = round(float(np.sqrt(max(neg_pos_ratio, 1.0))), 2)
+        full_ratio = round(float(neg_pos_ratio), 2)
+        ratio_choices = sorted({1.0, sqrt_ratio, full_ratio})
+        params = {
+            "n_estimators": trial.suggest_int("n_estimators", 100, 700, step=50),
+            "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.25, log=True),
+            "max_depth": trial.suggest_int("max_depth", 2, 10),
+            "min_child_weight": trial.suggest_float("min_child_weight", 0.5, 25.0, log=True),
+            "gamma": trial.suggest_float("gamma", 0.0, 5.0),
+            "max_delta_step": trial.suggest_int("max_delta_step", 0, 10),
+            "subsample": trial.suggest_float("subsample", 0.5, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
+            "colsample_bylevel": trial.suggest_float("colsample_bylevel", 0.5, 1.0),
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-5, 20.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 50.0, log=True),
+            "scale_pos_weight": trial.suggest_categorical("scale_pos_weight", ratio_choices),
         }
     else:
         raise ValueError(f"Unknown model: {model_name}")
@@ -133,9 +161,6 @@ def suggest_params(model_name, trial):
 
 
 def build_preprocessor(scaler_type):
-    """Numeric: impute + scale. Categorical: impute + one-hot (dense, because
-    GaussianNB cannot take sparse input). Columns are picked by dtype at fit
-    time, so no column lists are hard-coded."""
     scaler = StandardScaler() if scaler_type == "standard" else MinMaxScaler()
 
     numeric = Pipeline([
@@ -154,17 +179,24 @@ def build_preprocessor(scaler_type):
 
 def build_pipeline(model_name, params, scaler_type):
     if model_name == "KNN":
-        estimator = KNeighborsClassifier(**params, n_jobs=1)
+        estimator = KNeighborsClassifier(**params, n_jobs=-1)
     elif model_name == "DecisionTree":
         estimator = DecisionTreeClassifier(**params, random_state=42)
     elif model_name == "LogisticRegression":
-        estimator = LogisticRegression(**params, max_iter=2000, random_state=42)
+        estimator = LogisticRegression(**params, max_iter=3000, random_state=42)
     elif model_name == "GaussianNB":
         estimator = GaussianNB(**params)
     elif model_name == "RandomForest":
         estimator = RandomForestClassifier(**params, random_state=42, n_jobs=-1)
     elif model_name == "GradientBoosting":
         estimator = GradientBoostingClassifier(**params, random_state=42)
+    elif model_name == "XGBoost":
+        estimator = XGBClassifier(
+            **params,
+            eval_metric="logloss",
+            n_jobs=-1,
+            random_state=42,
+        )
     else:
         raise ValueError(f"Unknown model: {model_name}")
 
@@ -174,12 +206,7 @@ def build_pipeline(model_name, params, scaler_type):
     ])
 
 
-# --------------------------------------------------------------------------
-# Step 2: criteria measurement helpers
-# --------------------------------------------------------------------------
 def fit_with_timing(model_name, params, scaler_type, X, y, repeats):
-    """Fit the final pipeline `repeats` times; return last fitted model and
-    the median wall-clock fit time in seconds."""
     times = []
     pipeline = None
     for _ in range(max(1, repeats)):
@@ -191,14 +218,10 @@ def fit_with_timing(model_name, params, scaler_type, X, y, repeats):
 
 
 def measure_prediction_ms(model, X, n_samples, repeats, seed):
-    """Median latency (ms) of ONE single-row prediction.
-
-    Uses rows from the TRAINING data only; the test set is never touched.
-    """
     sample = X.sample(n=min(n_samples, len(X)), random_state=seed)
     rows = [sample.iloc[[i]] for i in range(len(sample))]
 
-    for row in rows[:3]:  # warm-up (lazy init, caches)
+    for row in rows[:3]:
         model.predict(row)
 
     per_repeat_ms = []
@@ -214,9 +237,6 @@ def file_size_mb(path):
     return os.path.getsize(path) / (1024 * 1024)
 
 
-# --------------------------------------------------------------------------
-# Step 3 + 4: selection logic
-# --------------------------------------------------------------------------
 def _normalise(values):
     lo, hi = min(values.values()), max(values.values())
     if hi - lo < 1e-12:
@@ -225,13 +245,10 @@ def _normalise(values):
 
 
 def select_champion(results, cfg):
-    """Apply the selection rules. Mutates `results` with eligibility/status
-    fields and returns (champion_name, explanation, fallback_used, ranked)."""
     gap_limit = float(cfg["max_score_gap_pct"])
     tolerance = float(cfg["score_tolerance_pct"])
     weights = cfg["weights"]
 
-    # Rule 1: gap must be STRICTLY below the limit.
     for r in results.values():
         r["eligible"] = bool(r["score_gap_pct"] < gap_limit)
 
@@ -248,8 +265,6 @@ def select_champion(results, cfg):
         fallback_used = True
         eligible = {n: r for n, r in results.items()}
 
-    # Rule 2: validation score first. Models within `tolerance` pp of the
-    # best validation score are finalists.
     best_val = max(r["validation_score_pct"] for r in eligible.values())
     if fallback_used:
         smallest_gap = min(r["score_gap_pct"] for r in eligible.values())
@@ -263,7 +278,6 @@ def select_champion(results, cfg):
             if best_val - r["validation_score_pct"] <= tolerance + 1e-9
         }
 
-    # Rules 3-5: smaller size, lower training time, lower prediction time.
     norm_size = _normalise({n: r["model_size_mb"] for n, r in finalists.items()})
     norm_train = _normalise({n: r["training_time_seconds"] for n, r in finalists.items()})
     norm_pred = _normalise({n: r["prediction_time_ms"] for n, r in finalists.items()})
@@ -275,7 +289,6 @@ def select_champion(results, cfg):
             + weights["prediction_time_ms"] * norm_pred[n]
         )
 
-    # Lowest cost wins; ties -> higher validation score -> name (deterministic).
     ranked = sorted(
         finalists,
         key=lambda n: (
@@ -342,16 +355,13 @@ def write_comparison_reports(results, champion, metric_name):
     return df
 
 
-# --------------------------------------------------------------------------
-# Main
-# --------------------------------------------------------------------------
 def main():
     with open("params.yaml", "r", encoding="utf-8") as file:
         config = yaml.safe_load(file)
 
     target = config["data"]["target"]
     metric_name = config["metric"]["primary"]
-    scorer = get_scorer(metric_name)  # fails fast on a bad metric name
+    scorer = get_scorer(metric_name)
 
     sel_cfg = config["selection"]
     meas_cfg = config["measurement"]
@@ -361,6 +371,10 @@ def main():
 
     X_train = pd.read_csv(X_TRAIN_PATH)
     y_train = pd.read_csv(Y_TRAIN_PATH)[target].astype(int)
+
+    pos_count = max(int((y_train == 1).sum()), 1)
+    neg_count = max(int((y_train == 0).sum()), 1)
+    neg_pos_ratio = neg_count / pos_count
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -373,7 +387,6 @@ def main():
 
     results = {}
 
-    # ---------------- Step 1 + 2: train all six models, measure criteria ----
     for model_name in MODEL_NAMES:
         print(f"\n--- Optimizing {model_name} ---")
 
@@ -386,7 +399,9 @@ def main():
             mlflow.log_param("max_score_gap_pct", gap_limit)
 
             def objective(trial):
-                scaler_type, model_params = suggest_params(model_name, trial)
+                scaler_type, model_params = suggest_params(
+                    model_name, trial, neg_pos_ratio=neg_pos_ratio
+                )
                 candidate = build_pipeline(model_name, model_params, scaler_type)
                 cv = StratifiedKFold(
                     n_splits=cv_folds, shuffle=True, random_state=random_state
@@ -399,7 +414,6 @@ def main():
                 train_score = float(cv_result["train_score"].mean())
                 gap_pct = (train_score - val_score) * 100.0
 
-                # Steer the search away from overfit configurations.
                 objective_value = val_score
                 if use_penalty and gap_pct >= gap_limit:
                     objective_value -= penalty_weight * (gap_pct - gap_limit + 1.0) / 100.0
@@ -434,7 +448,6 @@ def main():
             }
             best_cv_val_score = float(study.best_trial.user_attrs["cv_validation_score"])
 
-            # Final model on the full training set, timed.
             final_pipeline, train_time = fit_with_timing(
                 model_name, best_model_params, best_scaler, X_train, y_train,
                 int(meas_cfg["training_time_repeats"]),
@@ -444,9 +457,7 @@ def main():
             joblib.dump(final_pipeline, model_path)
             size_mb = file_size_mb(model_path)
 
-            # Training score: final model on the data it was fitted on.
             train_score_pct = 100.0 * float(scorer(final_pipeline, X_train, y_train))
-            # Validation score: stratified-CV score of the best config.
             val_score_pct = 100.0 * best_cv_val_score
             gap_pct = train_score_pct - val_score_pct
 
@@ -472,7 +483,7 @@ def main():
             mlflow.sklearn.log_model(
                 final_pipeline,
                 name=f"{model_name}_bank_model",
-                serialization_format="cloudpickle",  # skops rejects KNN's KDTree
+                serialization_format="cloudpickle",
             )
 
             results[model_name] = {
@@ -493,16 +504,14 @@ def main():
                 f"size={size_mb:.3f}MB fit={train_time:.3f}s predict={pred_ms:.3f}ms"
             )
 
-    # ---------------- Step 3 + 4: rules and automatic champion ------------
     champion, explanation, fallback_used, ranked = select_champion(results, sel_cfg)
 
     champion_path = MODELS_DIR / "model.pkl"
     shutil.copy2(MODELS_DIR / f"{champion}.pkl", champion_path)
 
     champ = results[champion]
-    selection = dict(results)  # per-model entries stay at top level
+    selection = dict(results)
     selection["champion"] = {
-        # Keys read by model_evaluation.py:
         "model_name": champion,
         "best_cv_score": champ["validation_score_pct"] / 100.0,
         "display_name": DISPLAY_NAMES[champion],

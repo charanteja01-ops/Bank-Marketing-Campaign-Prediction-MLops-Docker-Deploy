@@ -28,6 +28,19 @@ METRICS_PATH = BASE_DIR / "reports" / "metrics.json"
 DETAILS_PATH = BASE_DIR / "reports" / "evaluation_details.json"
 COMPARISON_CSV_PATH = BASE_DIR / "reports" / "model_comparison.csv"
 
+MONTH_MAP = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4,
+    "may": 5, "jun": 6, "jul": 7, "aug": 8,
+    "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+EDUCATION_RANK = {
+    "unknown": 0,
+    "illiterate": 0,
+    "primary": 1,
+    "secondary": 2,
+    "tertiary": 3,
+}
+
 try:
     from src.monitor_drift import (
         FEATURE_COLUMNS,
@@ -40,7 +53,7 @@ try:
     )
 except ImportError:
     try:
-        from monitor_drift import (
+        from monitor_drift import (  # type: ignore[import-not-found]
             FEATURE_COLUMNS,
             INFERENCE_LOG_PATH,
             REFERENCE_DATA_PATH,
@@ -56,9 +69,21 @@ except ImportError:
             "age", "job", "marital", "education", "default", "balance",
             "housing", "loan", "contact", "day", "month", "campaign",
             "pdays", "previous", "poutcome", "previously_contacted",
+            "pdays_clean", "recent_contact_30d", "has_any_loan",
+            "has_both_loans", "debt_free", "balance_is_negative",
+            "signed_log_balance", "balance_to_age_ratio", "age_group",
+            "is_student_or_retired", "is_blue_collar_or_admin",
+            "education_ordinal", "log_campaign", "heavy_campaign_calls",
+            "total_contacts", "campaign_to_total_ratio", "month_sin",
+            "month_cos", "day_sin", "day_cos", "prev_outcome_success",
+            "success_per_campaign_call", "loan_free_positive_balance",
         ]
         _NUMERIC_FEATURES = {
             "age", "balance", "day", "campaign", "pdays", "previous",
+            "pdays_clean", "signed_log_balance", "balance_to_age_ratio",
+            "education_ordinal", "log_campaign", "total_contacts",
+            "campaign_to_total_ratio", "month_sin", "month_cos",
+            "day_sin", "day_cos", "success_per_campaign_call",
         }
 
         def _ks_2samp(x, y):
@@ -207,7 +232,41 @@ RAW_INPUTS = [
     "age", "job", "marital", "education", "default", "balance", "housing",
     "loan", "contact", "day", "month", "campaign", "pdays", "previous", "poutcome",
 ]
-DERIVED = ["previously_contacted"]
+DERIVED = [
+    "previously_contacted",
+    "pdays_clean",
+    "recent_contact_30d",
+    "has_any_loan",
+    "has_both_loans",
+    "debt_free",
+    "balance_is_negative",
+    "signed_log_balance",
+    "balance_to_age_ratio",
+    "age_group",
+    "is_student_or_retired",
+    "is_blue_collar_or_admin",
+    "education_ordinal",
+    "log_campaign",
+    "heavy_campaign_calls",
+    "total_contacts",
+    "campaign_to_total_ratio",
+    "month_sin",
+    "month_cos",
+    "day_sin",
+    "day_cos",
+    "prev_outcome_success",
+    "success_per_campaign_call",
+    "loan_free_positive_balance",
+]
+ALLOWED_COLUMNS = set(RAW_INPUTS) | set(DERIVED)
+
+# High-value inputs shown in the form (lower-priority/noisy fields like day,
+# default, pdays, and previous are omitted from the UI and defaulted cleanly).
+CORE_FORM_INPUTS = [
+    "age", "job", "marital", "education",
+    "balance", "housing", "loan",
+    "contact", "month", "campaign", "poutcome",
+]
 
 OPTIONS = {
     "job": [
@@ -233,78 +292,329 @@ DEFAULT_VALUES = {
     "default": "no", "balance": 1500, "housing": "yes", "loan": "no",
     "contact": "cellular", "day": 15, "month": "may", "campaign": 2,
     "pdays": -1, "previous": 0, "poutcome": "unknown",
+    "previously_contacted": 0, "pdays_clean": 0, "recent_contact_30d": 0,
+    "has_any_loan": 1, "has_both_loans": 0, "debt_free": 0,
+    "balance_is_negative": 0, "signed_log_balance": round(float(np.log1p(1500)), 4),
+    "balance_to_age_ratio": round(1500 / 42.0, 4), "age_group": "working_age",
+    "is_student_or_retired": 0, "is_blue_collar_or_admin": 0,
+    "education_ordinal": 2, "log_campaign": round(float(np.log1p(2)), 4),
+    "heavy_campaign_calls": 0, "total_contacts": 2,
+    "campaign_to_total_ratio": round(2 / 3.0, 4),
+    "month_sin": round(float(np.sin(2.0 * np.pi * 5 / 12.0)), 6),
+    "month_cos": round(float(np.cos(2.0 * np.pi * 5 / 12.0)), 6),
+    "day_sin": round(float(np.sin(2.0 * np.pi * 15 / 31.0)), 6),
+    "day_cos": round(float(np.cos(2.0 * np.pi * 15 / 31.0)), 6),
+    "prev_outcome_success": 0, "success_per_campaign_call": 0.0,
+    "loan_free_positive_balance": 0,
 }
 
 PRESETS = {
     "Pick an example profile...": None,
     "Example A: Young professional (high intent)": {
         "age": 34, "job": "management", "marital": "single", "education": "tertiary",
-        "default": "no", "balance": 3500, "housing": "no", "loan": "no",
-        "contact": "cellular", "day": 15, "month": "mar", "campaign": 1,
-        "pdays": 90, "previous": 2, "poutcome": "success",
+        "balance": 3500, "housing": "no", "loan": "no",
+        "contact": "cellular", "month": "mar", "campaign": 1, "poutcome": "success",
     },
     "Example B: Retired saver": {
         "age": 67, "job": "retired", "marital": "married", "education": "secondary",
-        "default": "no", "balance": 5200, "housing": "no", "loan": "no",
-        "contact": "cellular", "day": 10, "month": "oct", "campaign": 1,
-        "pdays": -1, "previous": 0, "poutcome": "unknown",
+        "balance": 5200, "housing": "no", "loan": "no",
+        "contact": "cellular", "month": "oct", "campaign": 1, "poutcome": "unknown",
     },
     "Example C: Blue-collar with loans": {
         "age": 41, "job": "blue-collar", "marital": "married", "education": "primary",
-        "default": "no", "balance": 250, "housing": "yes", "loan": "yes",
-        "contact": "unknown", "day": 20, "month": "may", "campaign": 3,
-        "pdays": -1, "previous": 0, "poutcome": "unknown",
+        "balance": 250, "housing": "yes", "loan": "yes",
+        "contact": "unknown", "month": "may", "campaign": 3, "poutcome": "unknown",
     },
 }
 
 CSS = """
 <style>
-.block-container {padding-top: 1.5rem; max-width: 1200px;}
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Plus Jakarta Sans', sans-serif;
+}
+
+.block-container {
+    padding-top: 1.35rem;
+    padding-bottom: 2.5rem;
+    max-width: 1220px;
+}
+
 .hero {
-    background: linear-gradient(120deg, #1e3a8a 0%, #2563eb 55%, #06b6d4 100%);
-    color: #ffffff; padding: 1.5rem 2rem; border-radius: 18px; margin-bottom: 1.2rem;
-    box-shadow: 0 10px 28px rgba(37, 99, 235, 0.22);
+    background: linear-gradient(125deg, #0f172a 0%, #1d4ed8 48%, #0d9488 85%, #f59e0b 125%);
+    color: #ffffff;
+    padding: 1.65rem 2.1rem;
+    border-radius: 22px;
+    margin-bottom: 1.35rem;
+    box-shadow: 0 14px 34px rgba(15, 23, 42, 0.22);
+    border: 1px solid rgba(255, 255, 255, 0.16);
 }
-.hero h1 {margin: 0; font-size: 1.95rem; color: #ffffff;}
-.hero p {margin: .35rem 0 0 0; opacity: .92; font-size: 1rem; color: #ffffff;}
-.section-title {font-weight: 700; font-size: 1.02rem; margin: .2rem 0 .6rem 0;}
+
+.hero-tag {
+    display: inline-block;
+    background: rgba(255, 255, 255, 0.16);
+    backdrop-filter: blur(6px);
+    padding: 0.25rem 0.75rem;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    margin-bottom: 0.55rem;
+    color: #fef08a;
+}
+
+.hero h1 {
+    margin: 0;
+    font-size: 2.05rem;
+    font-weight: 800;
+    color: #ffffff;
+    letter-spacing: -0.02em;
+}
+
+.hero p {
+    margin: 0.45rem 0 0 0;
+    opacity: 0.94;
+    font-size: 1.02rem;
+    color: #f1f5f9;
+}
+
+.group-card {
+    border-radius: 16px;
+    padding: 0.55rem 0.85rem;
+    margin-bottom: 0.75rem;
+    font-weight: 700;
+    font-size: 0.96rem;
+    border-left: 5px solid;
+}
+
+.group-profile {
+    background: linear-gradient(90deg, rgba(37, 99, 235, 0.14), rgba(37, 99, 235, 0.03));
+    border-left-color: #2563eb;
+    color: #1e40af;
+}
+
+.group-finance {
+    background: linear-gradient(90deg, rgba(13, 148, 136, 0.16), rgba(13, 148, 136, 0.03));
+    border-left-color: #0d9488;
+    color: #0f766e;
+}
+
+.group-campaign {
+    background: linear-gradient(90deg, rgba(245, 158, 11, 0.18), rgba(245, 158, 11, 0.03));
+    border-left-color: #d97706;
+    color: #b45309;
+}
+
 div[data-testid="stMetric"] {
-    border: 1px solid rgba(128,128,128,.25); border-radius: 14px;
-    padding: .7rem .9rem; background: rgba(128,128,128,.06);
+    border: 1px solid rgba(59, 130, 246, 0.22);
+    border-radius: 16px;
+    padding: 0.8rem 1rem;
+    background: linear-gradient(145deg, rgba(37, 99, 235, 0.07), rgba(13, 148, 136, 0.05));
+    box-shadow: 0 4px 14px rgba(15, 23, 42, 0.05);
 }
-.ring-wrap {position: relative; width: 180px; height: 180px; margin: 0 auto;}
+
+button[data-baseweb="tab"] {
+    font-weight: 700 !important;
+    border-radius: 10px 10px 0 0 !important;
+    padding: 0.55rem 1rem !important;
+}
+
+.stButton > button[kind="primary"],
+.stFormSubmitButton > button[kind="primary"] {
+    background: linear-gradient(135deg, #2563eb 0%, #0d9488 100%) !important;
+    color: #ffffff !important;
+    border: none !important;
+    border-radius: 12px !important;
+    font-weight: 700 !important;
+    padding: 0.55rem 1.25rem !important;
+    box-shadow: 0 6px 18px rgba(37, 99, 235, 0.28) !important;
+    transition: transform 0.15s ease, box-shadow 0.15s ease !important;
+}
+
+.stButton > button[kind="primary"]:hover,
+.stFormSubmitButton > button[kind="primary"]:hover {
+    transform: translateY(-1px) !important;
+    box-shadow: 0 8px 22px rgba(13, 148, 136, 0.34) !important;
+}
+
+.ring-wrap {
+    position: relative;
+    width: 184px;
+    height: 184px;
+    margin: 0 auto;
+}
+
 .ring {
-    width: 100%; height: 100%; border-radius: 50%;
-    background: conic-gradient(var(--c) calc(var(--p) * 1%), rgba(128,128,128,.25) 0);
-    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 17px), #000 calc(100% - 16px));
-            mask: radial-gradient(farthest-side, transparent calc(100% - 17px), #000 calc(100% - 16px));
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    background: conic-gradient(var(--c) calc(var(--p) * 1%), rgba(148, 163, 184, 0.22) 0);
+    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 18px), #000 calc(100% - 17px));
+            mask: radial-gradient(farthest-side, transparent calc(100% - 18px), #000 calc(100% - 17px));
 }
+
 .ring-text {
-    position: absolute; inset: 0; display: flex; flex-direction: column;
-    align-items: center; justify-content: center;
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
 }
-.ring-text .pct {font-size: 2.15rem; font-weight: 800; line-height: 1;}
-.ring-text .lbl {font-size: .78rem; opacity: .72; margin-top: .25rem;}
+
+.ring-text .pct {
+    font-size: 2.2rem;
+    font-weight: 800;
+    line-height: 1;
+}
+
+.ring-text .lbl {
+    font-size: 0.78rem;
+    opacity: 0.75;
+    margin-top: 0.28rem;
+    font-weight: 600;
+}
+
 .badge {
-    display: inline-block; padding: .35rem .9rem; border-radius: 999px;
-    font-weight: 700; color: #ffffff; font-size: .95rem;
+    display: inline-block;
+    padding: 0.4rem 1rem;
+    border-radius: 999px;
+    font-weight: 700;
+    color: #ffffff;
+    font-size: 0.95rem;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
 }
-.small-note {font-size: .85rem; opacity: .78;}
+
+.small-note {
+    font-size: 0.85rem;
+    opacity: 0.8;
+}
 </style>
 """
 
 
 def add_features(X: pd.DataFrame) -> pd.DataFrame:
-    """Idempotent stateless feature engineering matching src/feature_engineering.py.
-
-    Skips pdays sentinel replacement if 'previously_contacted' already exists
-    (e.g., rows sampled from X_train.csv where pdays=-1 was already mapped to 0).
-    """
+    """Idempotent stateless feature engineering matching src/feature_engineering.py."""
     X = X.copy()
-    if "previously_contacted" not in X.columns and "pdays" in X.columns:
-        contacted = ~X["pdays"].isin([-1, 999])
-        X["previously_contacted"] = contacted.astype(int)
-        X["pdays"] = X["pdays"].where(contacted, 0)
+    for col, val in DEFAULT_VALUES.items():
+        if col in RAW_INPUTS and col not in X.columns:
+            X[col] = val
+
+    if "pdays" in X.columns:
+        pdays_num = pd.to_numeric(X["pdays"], errors="coerce").fillna(-1)
+        contacted = ~pdays_num.isin([-1, 999])
+        if "previously_contacted" not in X.columns:
+            X["previously_contacted"] = contacted.astype(int)
+        X["pdays"] = pd.to_numeric(X["pdays"], errors="coerce").where(contacted, 0)
+        if "pdays_clean" not in X.columns:
+            X["pdays_clean"] = pd.to_numeric(X["pdays"], errors="coerce").where(contacted, 0)
+        if "recent_contact_30d" not in X.columns:
+            X["recent_contact_30d"] = (contacted & (X["pdays_clean"] <= 30)).astype(int)
+
+    has_housing = (
+        X["housing"].astype(str).str.strip().str.lower().eq("yes")
+        if "housing" in X.columns
+        else pd.Series(False, index=X.index)
+    )
+    has_personal = (
+        X["loan"].astype(str).str.strip().str.lower().eq("yes")
+        if "loan" in X.columns
+        else pd.Series(False, index=X.index)
+    )
+    if "housing" in X.columns or "loan" in X.columns:
+        if "has_any_loan" not in X.columns:
+            X["has_any_loan"] = (has_housing | has_personal).astype(int)
+        if "has_both_loans" not in X.columns:
+            X["has_both_loans"] = (has_housing & has_personal).astype(int)
+        if "debt_free" not in X.columns:
+            X["debt_free"] = ((~has_housing) & (~has_personal)).astype(int)
+
+    if "balance" in X.columns:
+        bal = pd.to_numeric(X["balance"], errors="coerce").fillna(0.0)
+        if "balance_is_negative" not in X.columns:
+            X["balance_is_negative"] = (bal < 0).astype(int)
+        if "signed_log_balance" not in X.columns:
+            X["signed_log_balance"] = np.sign(bal) * np.log1p(np.abs(bal))
+        if "balance_to_age_ratio" not in X.columns and "age" in X.columns:
+            age = pd.to_numeric(X["age"], errors="coerce").fillna(40.0)
+            X["balance_to_age_ratio"] = (bal / (age.clip(lower=18.0) + 1.0)).round(4)
+
+    if "age" in X.columns and "age_group" not in X.columns:
+        age = pd.to_numeric(X["age"], errors="coerce").fillna(40.0)
+        X["age_group"] = pd.cut(
+            age,
+            bins=[0, 29, 59, 120],
+            labels=["young", "working_age", "senior"],
+            include_lowest=True,
+        ).astype(str)
+
+    if "job" in X.columns:
+        job_clean = X["job"].astype(str).str.strip().str.lower()
+        if "is_student_or_retired" not in X.columns:
+            X["is_student_or_retired"] = job_clean.isin(["student", "retired"]).astype(int)
+        if "is_blue_collar_or_admin" not in X.columns:
+            X["is_blue_collar_or_admin"] = job_clean.isin(["blue-collar", "admin."]).astype(int)
+
+    if "education" in X.columns and "education_ordinal" not in X.columns:
+        edu_clean = X["education"].astype(str).str.strip().str.lower()
+        X["education_ordinal"] = edu_clean.map(EDUCATION_RANK).fillna(0).astype(int)
+
+    if "campaign" in X.columns:
+        camp = pd.to_numeric(X["campaign"], errors="coerce").fillna(1.0).clip(lower=1.0)
+        if "log_campaign" not in X.columns:
+            X["log_campaign"] = np.log1p(camp)
+        if "heavy_campaign_calls" not in X.columns:
+            X["heavy_campaign_calls"] = (camp >= 4).astype(int)
+        if "previous" in X.columns:
+            prev = pd.to_numeric(X["previous"], errors="coerce").fillna(0.0).clip(lower=0.0)
+            if "total_contacts" not in X.columns:
+                X["total_contacts"] = camp + prev
+            if "campaign_to_total_ratio" not in X.columns:
+                X["campaign_to_total_ratio"] = (camp / (camp + prev + 1.0)).round(4)
+
+    if "month" in X.columns and ("month_sin" not in X.columns or "month_cos" not in X.columns):
+        month_num = (
+            X["month"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .str[:3]
+            .map(MONTH_MAP)
+            .fillna(5)
+        )
+        if "month_sin" not in X.columns:
+            X["month_sin"] = np.sin(2.0 * np.pi * month_num / 12.0).round(6)
+        if "month_cos" not in X.columns:
+            X["month_cos"] = np.cos(2.0 * np.pi * month_num / 12.0).round(6)
+
+    if "day" in X.columns and ("day_sin" not in X.columns or "day_cos" not in X.columns):
+        day_num = pd.to_numeric(X["day"], errors="coerce").fillna(15).clip(1, 31)
+        if "day_sin" not in X.columns:
+            X["day_sin"] = np.sin(2.0 * np.pi * day_num / 31.0).round(6)
+        if "day_cos" not in X.columns:
+            X["day_cos"] = np.cos(2.0 * np.pi * day_num / 31.0).round(6)
+
+    if "poutcome" in X.columns:
+        pout = X["poutcome"].astype(str).str.strip().str.lower()
+        if "prev_outcome_success" not in X.columns:
+            X["prev_outcome_success"] = pout.eq("success").astype(int)
+        if "success_per_campaign_call" not in X.columns and "campaign" in X.columns:
+            camp = pd.to_numeric(X["campaign"], errors="coerce").fillna(1.0)
+            X["success_per_campaign_call"] = (
+                X["prev_outcome_success"] / (camp.clip(lower=1.0))
+            ).round(4)
+
+    if "balance" in X.columns and "loan_free_positive_balance" not in X.columns:
+        bal = pd.to_numeric(X["balance"], errors="coerce").fillna(0.0)
+        any_loan = (
+            X["has_any_loan"]
+            if "has_any_loan" in X.columns
+            else (has_housing | has_personal).astype(int)
+        )
+        X["loan_free_positive_balance"] = ((any_loan == 0) & (bal > 0)).astype(int)
+
     return X
 
 
@@ -335,10 +645,10 @@ def score_positive(model, X: pd.DataFrame):
 
 def verdict_for(score: float, threshold: float):
     if score >= threshold:
-        return "Likely to subscribe", "#16a34a"
+        return "Likely to subscribe", "#10b981"
     if score >= max(threshold - 0.15, 0.0):
         return "Borderline", "#f59e0b"
-    return "Unlikely to subscribe", "#ef4444"
+    return "Unlikely to subscribe", "#f43f5e"
 
 
 def advice_for(label: str) -> str:
@@ -373,7 +683,7 @@ def get_reference_df() -> pd.DataFrame | None:
         return add_features(raw_df.drop(columns=[TARGET, "duration"], errors="ignore"))
     rng = np.random.RandomState(42)
     n_rows = 250
-    synth = pd.DataFrame({
+    return add_features(pd.DataFrame({
         "age": rng.normal(41.0, 10.0, n_rows).clip(18, 95).round().astype(int),
         "job": rng.choice(OPTIONS["job"][:6], n_rows),
         "marital": rng.choice(OPTIONS["marital"], n_rows, p=[0.6, 0.28, 0.12]),
@@ -389,9 +699,7 @@ def get_reference_df() -> pd.DataFrame | None:
         "pdays": np.zeros(n_rows, dtype=int),
         "previous": np.zeros(n_rows, dtype=int),
         "poutcome": rng.choice(OPTIONS["poutcome"], n_rows, p=[0.80, 0.11, 0.04, 0.05]),
-        "previously_contacted": np.zeros(n_rows, dtype=int),
-    })
-    return synth
+    }))
 
 
 @st.cache_resource(show_spinner=False)
@@ -441,8 +749,8 @@ init_state()
 selection, metrics, details = load_reports()
 
 with st.sidebar:
-    st.title("🏦 MLOps Platform")
-    st.caption("Automated Champion Model Serving")
+    st.title("🏦 MLOps Studio")
+    st.caption("Term Deposit Propensity & Drift Suite")
 
     if selection and "champion" in selection:
         champ = selection["champion"]
@@ -450,7 +758,7 @@ with st.sidebar:
         primary_metric = selection.get("primary_metric", "f1").upper()
 
         st.subheader("🏆 Active Champion")
-        st.info(f"**Model:** {champ.get('display_name', champ.get('model_name'))}")
+        st.success(f"**{champ.get('display_name', champ.get('model_name'))}**")
 
         col_a, col_b = st.columns(2)
         with col_a:
@@ -486,7 +794,7 @@ with st.sidebar:
         type=["pkl", "joblib"],
         help="Optional: upload a fitted scikit-learn pipeline trained on the bank dataset.",
     )
-    st.caption("Powered by DVC, MLflow, Optuna & Streamlit")
+    st.caption("DVC • MLflow • Optuna • KS & Chi-Square Drift")
 
 model = None
 model_source = ""
@@ -498,8 +806,11 @@ elif MODEL_PATH.exists():
     model_source = "models/model.pkl"
 
 st.markdown(
-    '<div class="hero"><h1>🏦 Bank Marketing MLOps Production Portal</h1>'
-    "<p>Real-time term deposit propensity scoring, model lineage inspection, and statistical drift monitoring.</p></div>",
+    '<div class="hero">'
+    '<div class="hero-tag">Production ML & Drift Intelligence</div>'
+    '<h1>🏦 Bank Marketing MLOps Portal</h1>'
+    "<p>Score term deposit propensity with key customer signals, inspect champion lineage, and track live data drift.</p>"
+    "</div>",
     unsafe_allow_html=True,
 )
 
@@ -513,7 +824,7 @@ tab_predict, tab_batch, tab_metrics, tab_monitoring = st.tabs([
 # ------------------ TAB 1: LIVE INFERENCE ------------------
 with tab_predict:
     st.header("Term Deposit Subscription Prediction")
-    st.write("Enter customer attributes below (or pick a preset) to score propensity and log production traffic:")
+    st.caption("Showing key customer, financial, and campaign features. Secondary fields use safe defaults automatically.")
 
     if model is None:
         st.error(
@@ -522,11 +833,13 @@ with tab_predict:
         )
         st.stop()
 
-    columns = input_columns(model)
-    unsupported = [c for c in columns if c not in RAW_INPUTS]
+    all_input_cols = input_columns(model)
+    unsupported = [c for c in all_input_cols if c not in ALLOWED_COLUMNS]
     if unsupported:
         st.error(f"Model expects unsupported input columns: {unsupported}")
         st.stop()
+
+    active_form_cols = [c for c in CORE_FORM_INPUTS if c in all_input_cols]
 
     st.selectbox("Quick start profile", list(PRESETS.keys()), key="preset", on_change=apply_preset)
 
@@ -534,33 +847,43 @@ with tab_predict:
         c1, c2, c3 = st.columns(3)
 
         with c1:
-            st.markdown('<div class="section-title">👤 Customer profile</div>', unsafe_allow_html=True)
-            st.number_input("Age", min_value=18, max_value=100, step=1, key="in_age")
-            st.selectbox("Job", OPTIONS["job"], key="in_job")
-            st.selectbox("Marital status", OPTIONS["marital"], key="in_marital")
-            st.selectbox("Education", OPTIONS["education"], key="in_education")
+            st.markdown('<div class="group-card group-profile">👤 Customer Profile</div>', unsafe_allow_html=True)
+            if "age" in active_form_cols:
+                st.number_input("Age", min_value=18, max_value=100, step=1, key="in_age")
+            if "job" in active_form_cols:
+                st.selectbox("Job", OPTIONS["job"], key="in_job")
+            if "marital" in active_form_cols:
+                st.selectbox("Marital status", OPTIONS["marital"], key="in_marital")
+            if "education" in active_form_cols:
+                st.selectbox("Education", OPTIONS["education"], key="in_education")
 
         with c2:
-            st.markdown('<div class="section-title">💰 Finances</div>', unsafe_allow_html=True)
-            st.number_input("Average yearly balance", min_value=-10000, max_value=200000, step=100, key="in_balance")
-            st.selectbox("Credit in default?", OPTIONS["default"], key="in_default")
-            st.selectbox("Housing loan?", OPTIONS["housing"], key="in_housing")
-            st.selectbox("Personal loan?", OPTIONS["loan"], key="in_loan")
+            st.markdown('<div class="group-card group-finance">💰 Financial Standing</div>', unsafe_allow_html=True)
+            if "balance" in active_form_cols:
+                st.number_input("Average yearly balance", min_value=-10000, max_value=200000, step=100, key="in_balance")
+            if "housing" in active_form_cols:
+                st.selectbox("Housing loan?", OPTIONS["housing"], key="in_housing")
+            if "loan" in active_form_cols:
+                st.selectbox("Personal loan?", OPTIONS["loan"], key="in_loan")
 
         with c3:
-            st.markdown('<div class="section-title">📞 Campaign contact</div>', unsafe_allow_html=True)
-            st.selectbox("Contact type", OPTIONS["contact"], key="in_contact")
-            st.selectbox("Last contact month", OPTIONS["month"], key="in_month")
-            st.number_input("Last contact day of month", min_value=1, max_value=31, step=1, key="in_day")
-            st.number_input("Contacts in this campaign", min_value=1, max_value=60, step=1, key="in_campaign")
-            st.number_input("Days since previous campaign (-1 = never)", min_value=-1, max_value=900, step=1, key="in_pdays")
-            st.number_input("Contacts before this campaign", min_value=0, max_value=60, step=1, key="in_previous")
-            st.selectbox("Outcome of previous campaign", OPTIONS["poutcome"], key="in_poutcome")
+            st.markdown('<div class="group-card group-campaign">📞 Campaign Signals</div>', unsafe_allow_html=True)
+            if "contact" in active_form_cols:
+                st.selectbox("Contact channel", OPTIONS["contact"], key="in_contact")
+            if "month" in active_form_cols:
+                st.selectbox("Last contact month", OPTIONS["month"], key="in_month")
+            if "campaign" in active_form_cols:
+                st.number_input("Contacts in this campaign", min_value=1, max_value=60, step=1, key="in_campaign")
+            if "poutcome" in active_form_cols:
+                st.selectbox("Previous campaign outcome", OPTIONS["poutcome"], key="in_poutcome")
 
         submitted = st.form_submit_button("🔮 Predict & Log Inference", type="primary")
 
     if submitted:
-        row = {col: st.session_state[f"in_{col}"] for col in columns}
+        row = {
+            col: st.session_state.get(f"in_{col}", DEFAULT_VALUES[col])
+            for col in all_input_cols
+        }
         X = prepare(pd.DataFrame([row]), model)
         scores, is_prob = score_positive(model, X)
         score = float(scores[0])
@@ -673,7 +996,7 @@ with tab_batch:
 # ------------------ TAB 3: MODEL LINEAGE & METRICS ------------------
 with tab_metrics:
     st.header("Model Lineage & Multi-Criteria Benchmark")
-    st.write("All 6 candidate models were tuned with Optuna and evaluated across 6 criteria to select the champion:")
+    st.write("All 7 candidate models were tuned with Optuna and evaluated across 6 criteria to select the champion:")
 
     if metrics:
         c1, c2, c3, c4, c5 = st.columns(5)

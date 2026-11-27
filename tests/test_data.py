@@ -1,8 +1,15 @@
 from pathlib import Path
+import sys
 
 import pandas as pd
 import pytest
 import yaml
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from src.feature_engineering import add_features
 
 RAW_DATA_PATH = Path("data/raw/bank.csv")
 TRAIN_DATA_PATH = Path("data/processed/train.csv")
@@ -19,6 +26,32 @@ RAW_FEATURES = [
     "loan", "contact", "day", "month", "duration", "campaign", "pdays",
     "previous", "poutcome",
 ]
+DERIVED_FEATURES = [
+    "previously_contacted",
+    "pdays_clean",
+    "recent_contact_30d",
+    "has_any_loan",
+    "has_both_loans",
+    "debt_free",
+    "balance_is_negative",
+    "signed_log_balance",
+    "balance_to_age_ratio",
+    "age_group",
+    "is_student_or_retired",
+    "is_blue_collar_or_admin",
+    "education_ordinal",
+    "log_campaign",
+    "heavy_campaign_calls",
+    "total_contacts",
+    "campaign_to_total_ratio",
+    "month_sin",
+    "month_cos",
+    "day_sin",
+    "day_cos",
+    "prev_outcome_success",
+    "success_per_campaign_call",
+    "loan_free_positive_balance",
+]
 EXPECTED_TARGET = "deposit"
 RAW_VALID_CLASSES = {"yes", "no"}
 ENCODED_VALID_CLASSES = {0, 1}
@@ -27,6 +60,7 @@ VALID_MONTHS = {
     "jan", "feb", "mar", "apr", "may", "jun",
     "jul", "aug", "sep", "oct", "nov", "dec",
 }
+VALID_AGE_GROUPS = {"young", "working_age", "senior"}
 
 
 def _require(*paths):
@@ -125,12 +159,12 @@ def test_splits_are_stratified_and_leak_free():
 
 
 def test_feature_engineered_splits_valid():
-    """Verify drop_columns removal and stateless pdays/previously_contacted features."""
+    """Verify drop_columns removal and all stateless engineered features."""
     _require(TRAIN_DATA_PATH, TEST_DATA_PATH, X_TRAIN_PATH, X_TEST_PATH, Y_TRAIN_PATH, Y_TEST_PATH)
 
     params = _load_params()
     drop_columns = params.get("data", {}).get("drop_columns", [])
-    expected_features = [c for c in RAW_FEATURES if c not in drop_columns] + ["previously_contacted"]
+    expected_features = [c for c in RAW_FEATURES if c not in drop_columns] + DERIVED_FEATURES
 
     train_df = pd.read_csv(TRAIN_DATA_PATH)
     test_df = pd.read_csv(TEST_DATA_PATH)
@@ -147,4 +181,20 @@ def test_feature_engineered_splits_valid():
         for col in drop_columns:
             assert col not in X_split.columns, f"{col} should be dropped from {split_name}"
         assert set(X_split["previously_contacted"].unique()) <= {0, 1}
+        assert set(X_split["recent_contact_30d"].unique()) <= {0, 1}
+        assert set(X_split["has_any_loan"].unique()) <= {0, 1}
+        assert set(X_split["has_both_loans"].unique()) <= {0, 1}
+        assert set(X_split["debt_free"].unique()) <= {0, 1}
+        assert set(X_split["balance_is_negative"].unique()) <= {0, 1}
+        assert set(X_split["age_group"].unique()) <= VALID_AGE_GROUPS
         assert (X_split["pdays"] >= 0).all(), f"Sentinel values left in pdays ({split_name})"
+        assert (X_split["pdays_clean"] >= 0).all(), f"Sentinel values left in pdays_clean ({split_name})"
+
+
+def test_add_features_is_stateless_and_idempotent():
+    """Verify add_features works row-wise and matches training feature engineering."""
+    _require(X_TRAIN_PATH)
+    X_train = pd.read_csv(X_TRAIN_PATH)
+    raw_subset = X_train[[c for c in RAW_FEATURES if c in X_train.columns]].head(5).copy()
+    engineered = add_features(raw_subset)
+    assert list(engineered.columns) == list(X_train.columns)

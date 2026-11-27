@@ -27,7 +27,7 @@ REFERENCE_DATA_PATH = ROOT_DIR / "data" / "processed" / "X_train.csv"
 DRIFT_REPORT_PATH = ROOT_DIR / "reports" / "drift_report.json"
 DRIFT_ALERT_PATH = ROOT_DIR / "reports" / "drift_alert.md"
 
-# 16 engineered features matching src/feature_engineering.py, X_train.csv, and models/model.pkl
+# 20 engineered features matching src/feature_engineering.py, X_train.csv, and models/model.pkl
 FEATURE_COLUMNS = [
     "age",
     "job",
@@ -45,10 +45,15 @@ FEATURE_COLUMNS = [
     "previous",
     "poutcome",
     "previously_contacted",
+    "has_any_loan",
+    "balance_is_negative",
+    "balance_to_age_ratio",
+    "age_group",
 ]
 
 # Continuous / count numeric features evaluated with two-sample KS-test.
-# Binary indicator 'previously_contacted' (0/1) is evaluated with Chi-Square.
+# Binary indicators ('previously_contacted', 'has_any_loan', 'balance_is_negative')
+# and 'age_group' are evaluated with Chi-Square.
 NUMERIC_FEATURES = {
     "age",
     "balance",
@@ -56,6 +61,7 @@ NUMERIC_FEATURES = {
     "campaign",
     "pdays",
     "previous",
+    "balance_to_age_ratio",
 }
 
 
@@ -379,6 +385,22 @@ def generate_sample_production_data(ref_df, simulate_drift=False, n_samples=250,
             sample["month"] = rng.choice(["dec", "mar", "oct"], len(sample))
         if "poutcome" in sample.columns:
             sample["poutcome"] = "success"
+
+        # Recompute derived columns when simulating drift so shifted inputs stay consistent
+        if "balance" in sample.columns:
+            bal = pd.to_numeric(sample["balance"], errors="coerce").fillna(0.0)
+            sample["balance_is_negative"] = (bal < 0).astype(int)
+            if "age" in sample.columns:
+                age = pd.to_numeric(sample["age"], errors="coerce").fillna(40)
+                sample["balance_to_age_ratio"] = (bal / (age.clip(lower=18) + 1.0)).round(4)
+        if "age" in sample.columns:
+            age = pd.to_numeric(sample["age"], errors="coerce").fillna(40)
+            sample["age_group"] = pd.cut(
+                age,
+                bins=[0, 29, 59, 120],
+                labels=["young", "working_age", "senior"],
+                include_lowest=True,
+            ).astype(str)
 
     return sample.reset_index(drop=True)
 

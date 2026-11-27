@@ -39,6 +39,7 @@ MODEL_NAMES = [
     "GaussianNB",
     "RandomForest",
     "GradientBoosting",
+    "XGBoost",
 ]
 
 
@@ -92,8 +93,6 @@ def main():
     criteria = champion_info["criteria"]
     policy = selection["selection_policy"]
 
-    # Test metrics for ALL candidates are for comparison/reporting only.
-    # They are never used to pick or change the champion.
     all_results = {}
     for model_name in MODEL_NAMES:
         model = joblib.load(Path("models") / f"{model_name}.pkl")
@@ -104,7 +103,6 @@ def main():
 
     tn, fp, fn, tp = confusion_matrix(y_test, champion.predict(X_test)).ravel()
 
-    # Flat, numeric-only file so `dvc metrics show` stays readable.
     metrics = {
         "accuracy": champion_metrics["accuracy"],
         "balanced_accuracy": champion_metrics["balanced_accuracy"],
@@ -120,11 +118,9 @@ def main():
         "champion_model_size_mb": criteria["model_size_mb"],
         "champion_training_time_seconds": criteria["training_time_seconds"],
         "champion_prediction_time_ms": criteria["prediction_time_ms"],
-        # Same metric as used for selection: CV validation vs. held-out test.
         "test_vs_validation_gap_pct": criteria["validation_score_pct"] - test_primary_pct,
     }
 
-    # Everything else (names, per-model comparison, per-class reports).
     details = {
         "champion_model": champion_name,
         "primary_metric": metric_name,

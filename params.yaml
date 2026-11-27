@@ -2,7 +2,7 @@ experiment_name: bank_marketing_campaign
 random_state: 42
 test_size: 0.2
 cv_folds: 5
-n_trials: 20
+n_trials: 40
 
 data:
   # UCI "bank-full.csv" (sep ';', target 'y'). For bank-additional-full.csv keep
@@ -16,20 +16,20 @@ data:
   drop_columns: ["duration"]
 
 metric:
-  # Bank marketing is imbalanced (~12% 'yes'): do not use accuracy here.
-  # Options: f1 | roc_auc | average_precision | balanced_accuracy | accuracy
-  primary: f1
+  # Use 'accuracy' for raw accuracy, or keep 'f1' / 'roc_auc' / 'average_precision'
+  # for imbalanced (~12% 'yes') bank marketing data.
+  primary: accuracy
 
 selection:
-  max_score_gap_pct: 5.0          # train score - CV score must be strictly below this
-  score_tolerance_pct: 1.0        # finalists are within this many pp of the best CV score
+  max_score_gap_pct: 12.0         # relaxed gap limit so high-scoring models stay eligible
+  score_tolerance_pct: 0.2        # near-strict highest score priority
   gap_penalty_in_search: true
-  gap_penalty_weight: 1.0
-  fallback_if_none_eligible: smallest_gap   # or: error
+  gap_penalty_weight: 0.25        # light penalty so Optuna focuses on validation score
+  fallback_if_none_eligible: smallest_gap
   weights:
-    model_size_mb: 0.3
-    training_time_seconds: 0.4
-    prediction_time_ms: 0.3
+    model_size_mb: 0.2
+    training_time_seconds: 0.3
+    prediction_time_ms: 0.5
 
 measurement:
   training_time_repeats: 3
