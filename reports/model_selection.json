@@ -1,0 +1,184 @@
+{
+    "KNN": {
+        "best_params": {
+            "scaler_type": "standard",
+            "metric": "manhattan",
+            "n_neighbors": 29,
+            "weights": "uniform",
+            "leaf_size": 60
+        },
+        "model_size_mb": 5.253935813903809,
+        "training_time_seconds": 0.09031620000041585,
+        "prediction_time_ms": 8.700122000009287,
+        "training_score_pct": 72.94209877925859,
+        "validation_score_pct": 71.3741048491065,
+        "score_gap_pct": 1.5679939301520847,
+        "search_time_seconds": 318.4558005332947,
+        "model_path": "models/KNN.pkl",
+        "eligible": true,
+        "status": "eligible_but_below_score_tolerance"
+    },
+    "DecisionTree": {
+        "best_params": {
+            "scaler_type": "standard",
+            "criterion": "entropy",
+            "splitter": "random",
+            "max_depth": 14,
+            "min_samples_split": 55,
+            "min_samples_leaf": 31,
+            "max_features": null,
+            "class_weight": "balanced",
+            "ccp_alpha": 0.0011745222549637833
+        },
+        "model_size_mb": 0.013019561767578125,
+        "training_time_seconds": 0.14314389999981358,
+        "prediction_time_ms": 9.107691999997769,
+        "training_score_pct": 71.86695038638146,
+        "validation_score_pct": 70.72480324716672,
+        "score_gap_pct": 1.1421471392147424,
+        "search_time_seconds": 39.4089891910553,
+        "model_path": "models/DecisionTree.pkl",
+        "eligible": true,
+        "status": "eligible_but_below_score_tolerance"
+    },
+    "LogisticRegression": {
+        "best_params": {
+            "scaler_type": "minmax",
+            "solver": "liblinear",
+            "C": 0.06971243773491125,
+            "class_weight": null
+        },
+        "model_size_mb": 0.009679794311523438,
+        "training_time_seconds": 0.12471389999973326,
+        "prediction_time_ms": 9.175087999992684,
+        "training_score_pct": 71.93414716093628,
+        "validation_score_pct": 71.63179538332692,
+        "score_gap_pct": 0.30235177760935983,
+        "search_time_seconds": 443.933313369751,
+        "model_path": "models/LogisticRegression.pkl",
+        "eligible": true,
+        "status": "eligible_but_below_score_tolerance"
+    },
+    "GaussianNB": {
+        "best_params": {
+            "scaler_type": "minmax",
+            "var_smoothing": 0.0960386159612104
+        },
+        "model_size_mb": 0.011339187622070312,
+        "training_time_seconds": 0.10036979999949835,
+        "prediction_time_ms": 9.577437999996619,
+        "training_score_pct": 70.04143801097548,
+        "validation_score_pct": 69.96298631434657,
+        "score_gap_pct": 0.07845169662891749,
+        "search_time_seconds": 36.90447521209717,
+        "model_path": "models/GaussianNB.pkl",
+        "eligible": true,
+        "status": "eligible_but_below_score_tolerance"
+    },
+    "RandomForest": {
+        "best_params": {
+            "scaler_type": "minmax",
+            "bootstrap": false,
+            "n_estimators": 550,
+            "criterion": "entropy",
+            "max_depth": 25,
+            "min_samples_split": 9,
+            "min_samples_leaf": 11,
+            "max_features": "sqrt",
+            "ccp_alpha": 8.689828178778003e-05
+        },
+        "model_size_mb": 36.55895519256592,
+        "training_time_seconds": 2.143587700000353,
+        "prediction_time_ms": 130.72127999999793,
+        "training_score_pct": 81.49848807257251,
+        "validation_score_pct": 73.30044761465618,
+        "score_gap_pct": 8.198040457916335,
+        "search_time_seconds": 854.3597686290741,
+        "model_path": "models/RandomForest.pkl",
+        "eligible": true,
+        "status": "eligible_but_below_score_tolerance"
+    },
+    "GradientBoosting": {
+        "best_params": {
+            "scaler_type": "standard",
+            "loss": "exponential",
+            "n_estimators": 500,
+            "learning_rate": 0.24316510335175537,
+            "max_depth": 7,
+            "min_samples_split": 21,
+            "min_samples_leaf": 42,
+            "max_features": null,
+            "subsample": 0.7620763247266882,
+            "ccp_alpha": 0.001177614742795623
+        },
+        "model_size_mb": 0.2076549530029297,
+        "training_time_seconds": 28.426458300000377,
+        "prediction_time_ms": 8.765655999995943,
+        "training_score_pct": 75.77556277298689,
+        "validation_score_pct": 73.73722165237876,
+        "score_gap_pct": 2.0383411206081234,
+        "search_time_seconds": 2209.3884596824646,
+        "model_path": "models/GradientBoosting.pkl",
+        "eligible": true,
+        "status": "eligible_but_below_score_tolerance"
+    },
+    "XGBoost": {
+        "best_params": {
+            "scaler_type": "minmax",
+            "n_estimators": 300,
+            "learning_rate": 0.026953007271946255,
+            "max_depth": 6,
+            "min_child_weight": 1.7255183520018742,
+            "gamma": 1.717886819364999,
+            "max_delta_step": 8,
+            "subsample": 0.6854143602426974,
+            "colsample_bytree": 0.8786427871990832,
+            "colsample_bylevel": 0.8535824318907748,
+            "reg_alpha": 0.044541686414729054,
+            "reg_lambda": 0.00035325399507658964,
+            "scale_pos_weight": 1.05
+        },
+        "model_size_mb": 0.7947578430175781,
+        "training_time_seconds": 0.5322402000001603,
+        "prediction_time_ms": 8.598841999992146,
+        "training_score_pct": 79.47138537350207,
+        "validation_score_pct": 74.1740019636074,
+        "score_gap_pct": 5.297383409894678,
+        "search_time_seconds": 132.01664280891418,
+        "model_path": "models/XGBoost.pkl",
+        "eligible": true,
+        "selection_cost": 0.0,
+        "status": "champion",
+        "finalist_rank": 1
+    },
+    "champion": {
+        "model_name": "XGBoost",
+        "best_cv_score": 0.7417400196360739,
+        "display_name": "XGBoost",
+        "criteria": {
+            "model_size_mb": 0.7947578430175781,
+            "training_time_seconds": 0.5322402000001603,
+            "prediction_time_ms": 8.598841999992146,
+            "training_score_pct": 79.47138537350207,
+            "validation_score_pct": 74.1740019636074,
+            "score_gap_pct": 5.297383409894678
+        },
+        "explanation": "XGBoost selected: passed gap rule (< 12.0%); 1 finalist(s) within 0.2 pp of best validation score (74.17%); lowest weighted size/train-time/predict-time cost."
+    },
+    "champion_model_path": "models/model.pkl",
+    "primary_metric": "accuracy",
+    "selection_policy": {
+        "max_score_gap_pct (strictly below)": 12.0,
+        "score_tolerance_pct": 0.2,
+        "weights": {
+            "model_size_mb": 0.2,
+            "training_time_seconds": 0.3,
+            "prediction_time_ms": 0.5
+        },
+        "fallback_used": false,
+        "finalist_ranking": [
+            "XGBoost"
+        ],
+        "selection_data": "training data only (CV validation); test set untouched"
+    }
+}

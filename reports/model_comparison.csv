@@ -1,0 +1,8 @@
+Model,Size MB,Train time s,Predict ms,Train accuracy %,Val accuracy %,Gap %,Eligible,Status
+KNN,5.2539,0.0903,8.7001,72.94,71.37,1.57,Yes,eligible_but_below_score_tolerance
+Decision Tree,0.013,0.1431,9.1077,71.87,70.72,1.14,Yes,eligible_but_below_score_tolerance
+Logistic Regression,0.0097,0.1247,9.1751,71.93,71.63,0.3,Yes,eligible_but_below_score_tolerance
+Gaussian NB,0.0113,0.1004,9.5774,70.04,69.96,0.08,Yes,eligible_but_below_score_tolerance
+Random Forest,36.559,2.1436,130.7213,81.5,73.3,8.2,Yes,eligible_but_below_score_tolerance
+Gradient Boosting,0.2077,28.4265,8.7657,75.78,73.74,2.04,Yes,eligible_but_below_score_tolerance
+XGBoost,0.7948,0.5322,8.5988,79.47,74.17,5.3,Yes,champion
